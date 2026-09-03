@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Code per Telegram fernsteuern — Nachbau-Anleitung</title>
+<style>
+:root{
+  --bg:#fafaf9; --fg:#1c1917; --muted:#78716c; --line:#e7e5e4;
+  --accent:#4f46e5; --accent-soft:#eef2ff;
+  --code-bg:#1e1e2e; --code-fg:#e2e8f0; --inline-bg:#f1f0ee; --inline-fg:#9d3fd1;
+  --th-bg:#f5f5f4;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#101014; --fg:#e7e5e4; --muted:#a8a29e; --line:#27272a;
+    --accent:#818cf8; --accent-soft:#1e1b4b;
+    --code-bg:#18181f; --code-fg:#e2e8f0; --inline-bg:#26262e; --inline-fg:#d8b4fe;
+    --th-bg:#1c1c22;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:17px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:800px;margin:0 auto;padding:48px 24px 96px}
+header{margin-bottom:40px}
+header h1{font-size:34px;line-height:1.2;margin:0 0 10px;letter-spacing:-.02em}
+header p.sub{color:var(--muted);margin:0 0 18px;font-size:18px}
+.badges span{display:inline-block;background:var(--accent-soft);color:var(--accent);
+  border-radius:999px;padding:4px 12px;font-size:13px;font-weight:600;margin:0 6px 6px 0}
+.toc{border:1px solid var(--line);border-radius:12px;padding:16px 22px;margin:0 0 40px;font-size:15px}
+.toc strong{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+.toc ul{margin:8px 0 0;padding-left:18px}
+.toc li{margin:3px 0}
+h2{font-size:25px;margin:56px 0 14px;padding-top:28px;border-top:1px solid var(--line);letter-spacing:-.01em}
+h3{font-size:19px;margin:32px 0 8px}
+p{margin:0 0 14px}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+ul,ol{margin:0 0 16px;padding-left:24px}
+li{margin:5px 0}
+code{background:var(--inline-bg);color:var(--inline-fg);border-radius:6px;
+  padding:2px 6px;font:13.5px/1.5 ui-monospace,"Cascadia Code",Consolas,Menlo,monospace}
+pre{position:relative;background:var(--code-bg);border-radius:12px;padding:18px 20px;
+  overflow-x:auto;margin:0 0 20px}
+pre::before{content:attr(data-lang);position:absolute;top:8px;right:14px;
+  font:11px ui-monospace,monospace;color:#94a3b8;text-transform:uppercase;letter-spacing:.08em}
+pre code{background:none;color:var(--code-fg);padding:0;font-size:13px;display:block}
+table{border-collapse:collapse;width:100%;margin:0 0 22px;font-size:14.5px}
+th{background:var(--th-bg);text-align:left}
+th,td{border:1px solid var(--line);padding:8px 12px;vertical-align:top}
+td code,th code{white-space:nowrap}
+strong{font-weight:650}
+footer{margin-top:64px;padding-top:20px;border-top:1px solid var(--line);
+  color:var(--muted);font-size:13.5px}
+@media (max-width:640px){
+  .wrap{padding:28px 16px 64px}
+  header h1{font-size:27px}
+  body{font-size:16px}
+  table{display:block;overflow-x:auto}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+<h1>Claude Code per Telegram fernsteuern</h1>
+<p class="sub">Nachbau-Anleitung: Sessions vom Handy eröffnen, steuern und freigeben — ohne offenen Port, ohne Fremdcode.</p>
+<div class="badges"><span>Linux-Server</span><span>Node.js 22+</span><span>Claude Code</span><span>Telegram Bot API</span><span>2 Scripts, 0 Dependencies</span></div>
+</header>
+<nav class="toc"><strong>Inhalt</strong><ul><li><a href="#1-was-ist-das">1. Was ist das?</a></li><li><a href="#2-wie-funktioniert-es">2. Wie funktioniert es?</a></li><li><a href="#3-nachbau-schritt-für-schritt">3. Nachbau Schritt für Schritt</a></li><li><a href="#4-referenz-befehle-modi-parameter">4. Referenz: Befehle, Modi, Parameter</a></li></ul></nav>
+<p>Eine Anleitung zum 1:1-Nachbau. Alle persönlichen Werte sind Platzhalter in spitzen Klammern: <code>&lt;BOT_TOKEN&gt;</code>, <code>&lt;CHAT_ID&gt;</code>, <code>&lt;DEIN-SERVER&gt;</code>.</p>
+<h2 id="1-was-ist-das">1. Was ist das?</h2>
+<p>Ein selbstgebauter Telegram-Bot (ein Node-Script, null Fremdpakete), mit dem du Claude-Code-Sessions auf einem Linux-Server vom Handy aus steuerst:</p>
+<ul>
+<li>Jede Telegram-Nachricht ist ein Auftrag an eine laufende Claude-Session — mit vollem Gesprächsgedächtnis</li>
+<li>Sessions eröffnen, wechseln, auflisten und beenden, ohne je am Server etwas einzutippen</li>
+<li>Projektverzeichnis und Berechtigungsmodus je Session wählbar</li>
+<li>Braucht Claude eine Berechtigung (z. B. einen Shell-Befehl), bekommst du in Telegram eine Anfrage mit „Erlauben / Ablehnen"-Buttons</li>
+<li>Jede Session lässt sich jederzeit am Rechner per SSH als volle interaktive Claude-Code-Sitzung fortsetzen</li>
+</ul>
+<p>Kein offener Port, keine Webhooks: Der Bot holt Nachrichten per Long Polling ab (nur ausgehende HTTPS-Verbindungen) und akzeptiert ausschließlich deine eigene Telegram-Chat-ID.</p>
+<h2 id="2-wie-funktioniert-es">2. Wie funktioniert es?</h2>
+<p>Drei kleine Komponenten:</p>
+<p><strong>a) Der Bot</strong> (<code>telegram-session.mjs</code>, läuft als systemd-Dienst)</p>
+<p>Nutzt die dokumentierte Headless-Schnittstelle von Claude Code:</p>
+<pre data-lang="bash"><code>claude -p "Auftrag" --output-format json          # liefert session_id im JSON
+claude -p "Folgeauftrag" --resume &lt;session_id&gt;    # setzt die Session fort</code></pre>
+<p>Der Bot merkt sich Sessions in einem JSON-Register (<code>/root/.claude-sessions.json</code>). Wichtiges Detail: <strong><code>--resume</code> liefert bei jedem Aufruf eine neue Session-ID zurück</strong> (die Fortsetzung ist technisch ein Fork). Der Bot übernimmt die neue ID ins Register — sonst würde jeder Folgeauftrag am alten Stand ansetzen.</p>
+<p><strong>b) Der Permission-MCP</strong> (<code>permission-mcp.mjs</code>)</p>
+<p>Claude Code kann Berechtigungsentscheidungen an ein MCP-Tool delegieren (<code>--permission-prompt-tool</code>). Dieser Mini-MCP-Server (Zeilen-JSON-RPC über stdio) schickt bei jeder Anfrage eine Telegram-Nachricht mit Inline-Buttons und pollt dann eine Antwortdatei. Drückst du „Erlauben", schreibt der Bot die Antwortdatei nach <code>/root/.perm/&lt;id&gt;</code>, der MCP liest sie und gibt <code>allow</code> an Claude zurück. Keine Antwort in 5 Minuten = automatisch abgelehnt, die Nachricht wird als ABGELAUFEN gekennzeichnet und die Buttons verschwinden.</p>
+<p><strong>Stolperfalle aus der Praxis</strong>: Claude Code bricht MCP-Tool-Aufrufe standardmäßig nach ~30 Sekunden ab — schneller, als ein Mensch den Button drückt. Deshalb setzt der Bot <code>MCP_TOOL_TIMEOUT=360000</code> (6 Minuten) in die Umgebung des Claude-Prozesses. Ohne das läuft jede Freigabe ins Leere.</p>
+<p><strong>c) Die Berechtigungslogik</strong></p>
+<p>Basis ist <code>--permission-mode acceptEdits</code>: Lesen und Dateiänderungen laufen automatisch. <code>WebSearch</code> und <code>WebFetch</code> sind per <code>--allowedTools</code> fest erlaubt. Alles Weitere (vor allem Shell-Befehle) geht über die Buttons. Zwei Dinge muss man wissen:</p>
+<ul>
+<li>Harmlose read-only-Befehle (<code>uptime</code>, <code>ls</code> …) stuft Claude Code selbst als unbedenklich ein und führt sie ohne Anfrage aus — gewollt, keine Button-Flut</li>
+<li>Die Buttons schützen Shell &amp; Co., <strong>nicht</strong> Dateiänderungen — die sind unter acceptEdits per Design frei. Wer jede Änderung bestätigen will, nimmt den Modus <code>standard</code></li>
+</ul>
+<h2 id="3-nachbau-schritt-für-schritt">3. Nachbau Schritt für Schritt</h2>
+<h3 id="3-1-voraussetzungen">3.1 Voraussetzungen</h3>
+<ul>
+<li>Linux-Server (getestet: Ubuntu 24.04), 4 GB RAM, Node.js 22+</li>
+<li>Claude Code installiert und angemeldet (<code>curl -fsSL https://claude.ai/install.sh | bash</code>, dann <code>claude</code> starten und einloggen; Pro- oder Max-Abo)</li>
+<li>Ein Telegram-Konto</li>
+<li>Die Anleitung nimmt an, dass alles unter <code>root</code> läuft und Claude in <code>/root/.local/bin/claude</code> liegt — Pfade sonst anpassen</li>
+</ul>
+<h3 id="3-2-telegram-bot-anlegen">3.2 Telegram-Bot anlegen</h3>
+<ol>
+<li>In Telegram <code>@BotFather</code> anschreiben: <code>/newbot</code>, Namen vergeben → <strong>Token notieren</strong> (<code>&lt;BOT_TOKEN&gt;</code>)</li>
+<li>Dem neuen Bot einmal <code>/start</code> schicken (sonst darf er dir nicht antworten)</li>
+<li>Eigene Chat-ID auslesen: <code>curl -s "https://api.telegram.org/bot&lt;BOT_TOKEN&gt;/getUpdates"</code> → Wert <code>chat.id</code> (<code>&lt;CHAT_ID&gt;</code>)</li>
+</ol>
+<h3 id="3-3-zugangsdaten-ablegen">3.3 Zugangsdaten ablegen</h3>
+<pre data-lang="bash"><code>mkdir -p /root/.config
+cat &gt; /root/.config/telegram-session.env &lt;&lt;'EOF'
+BOT_TOKEN=&lt;BOT_TOKEN&gt;
+CHAT_ID=&lt;CHAT_ID&gt;
+EOF
+chmod 600 /root/.config/telegram-session.env</code></pre>
+<h3 id="3-4-projekt-mapping-anlegen">3.4 Projekt-Mapping anlegen</h3>
+<pre data-lang="bash"><code>echo '{"vault": "/root/vault"}' &gt; /root/.config/claude-projekte.json</code></pre>
+<p>Der Schlüssel ist der Kurzname für <code>/neu &lt;name&gt;</code>, der Wert das Arbeitsverzeichnis. Trage hier deine eigenen Verzeichnisse ein — das erste ist zugleich sinnvoller Standard (Konstante <code>DEFAULT_CWD</code> im Bot-Script anpassen, falls es nicht <code>/root/vault</code> sein soll).</p>
+<h3 id="3-5-mcp-konfiguration-anlegen">3.5 MCP-Konfiguration anlegen</h3>
+<pre data-lang="bash"><code>mkdir -p /root/bin
+echo '{"mcpServers": {"perm": {"command": "node", "args": ["/root/bin/permission-mcp.mjs"]}}}' &gt; /root/bin/perm-mcp.json</code></pre>
+<h3 id="3-6-den-permission-mcp-anlegen-root-bin-permission-mcp-mjs">3.6 Den Permission-MCP anlegen: <code>/root/bin/permission-mcp.mjs</code></h3>
+<pre data-lang="javascript"><code>#!/usr/bin/env node
+// Permission-MCP: leitet Claudes Berechtigungsanfragen als Telegram-Buttons weiter.
+// Wird von claude -p ueber --permission-prompt-tool mcp__perm__approve aufgerufen.
+// Antwortdateien schreibt der Session-Bot bei Button-Tipp nach /root/.perm/&lt;id&gt;.
+import { readFileSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
+import { createInterface } from "node:readline";
+
+let TOKEN = process.env.BOT_TOKEN, CHAT = process.env.CHAT_ID;
+if (!TOKEN || !CHAT) {
+  try {
+    const env = readFileSync("/root/.config/telegram-session.env", "utf8");
+    TOKEN = TOKEN || (env.match(/^BOT_TOKEN=(.+)$/m) || [])[1];
+    CHAT = CHAT || (env.match(/^CHAT_ID=(.+)$/m) || [])[1];
+  } catch {}
+}
+const API = `https://api.telegram.org/bot${TOKEN}`;
+const DIR = "/root/.perm";
+const out = (obj) =&gt; process.stdout.write(JSON.stringify(obj) + "\n");
+
+const kurzInput = (inp) =&gt; {
+  try {
+    if (inp &amp;&amp; typeof inp.command === "string") return inp.command.slice(0, 600);
+    const s = JSON.stringify(inp);
+    return s.length &gt; 600 ? s.slice(0, 600) + "..." : s;
+  } catch { return String(inp); }
+};
+
+async function frage(toolName, input) {
+  mkdirSync(DIR, { recursive: true });
+  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  const file = `${DIR}/${id}`;
+  const anfrage = `Claude bittet um Erlaubnis:\n${toolName}\n${kurzInput(input)}`;
+  const resp = await fetch(`${API}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: Number(CHAT), text: anfrage,
+      reply_markup: { inline_keyboard: [[
+        { text: "Erlauben", callback_data: `perm:${id}:ja` },
+        { text: "Ablehnen", callback_data: `perm:${id}:nein` }
+      ]] } }) });
+  let mid = null;
+  try { mid = (await resp.json())?.result?.message_id ?? null; } catch {}
+  const ende = Date.now() + 300000; // 5 Minuten
+  while (Date.now() &lt; ende) {
+    await new Promise((r) =&gt; setTimeout(r, 2000));
+    if (existsSync(file)) {
+      const antwort = readFileSync(file, "utf8").trim();
+      try { unlinkSync(file); } catch {}
+      return antwort === "ja";
+    }
+  }
+  // Abgelaufen: Nachricht kennzeichnen und Buttons entfernen
+  if (mid) {
+    await fetch(`${API}/editMessageText`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: Number(CHAT), message_id: mid,
+        text: ("ABGELAUFEN - keine Antwort in 5 Minuten, automatisch abgelehnt.\n\n" + anfrage).slice(0, 4000) }) }).catch(() =&gt; {});
+  }
+  return false;
+}
+
+const rl = createInterface({ input: process.stdin });
+rl.on("line", async (line) =&gt; {
+  let m; try { m = JSON.parse(line); } catch { return; }
+  try {
+    if (m.method === "initialize") {
+      out({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: (m.params &amp;&amp; m.params.protocolVersion) || "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "perm", version: "2.0.0" } } });
+    } else if (m.method === "tools/list") {
+      out({ jsonrpc: "2.0", id: m.id, result: { tools: [{ name: "approve", description: "Fragt per Telegram um Erlaubnis fuer eine Tool-Nutzung", inputSchema: { type: "object", properties: { tool_name: { type: "string" }, input: { type: "object" } }, required: ["tool_name", "input"] } }] } });
+    } else if (m.method === "tools/call" &amp;&amp; m.params &amp;&amp; m.params.name === "approve") {
+      const a = m.params.arguments || {};
+      const ok = await frage(a.tool_name || "unbekannt", a.input || {});
+      const ergebnis = ok
+        ? { behavior: "allow", updatedInput: a.input || {} }
+        : { behavior: "deny", message: "Abgelehnt oder keine Antwort innerhalb von 5 Minuten." };
+      out({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: JSON.stringify(ergebnis) }] } });
+    } else if (m.id !== undefined) {
+      out({ jsonrpc: "2.0", id: m.id, result: {} });
+    }
+  } catch (e) {
+    if (m &amp;&amp; m.id !== undefined) out({ jsonrpc: "2.0", id: m.id, error: { code: -32000, message: String((e &amp;&amp; e.message) || e).slice(0, 200) } });
+  }
+});</code></pre>
+<h3 id="3-7-den-bot-anlegen-root-bin-telegram-session-mjs">3.7 Den Bot anlegen: <code>/root/bin/telegram-session.mjs</code></h3>
+<p>Die Konstante <code>HOST</code> unten auf deinen Servernamen setzen (wird nur für den SSH-Hinweis in <code>/status</code> gebraucht).</p>
+<pre data-lang="javascript"><code>#!/usr/bin/env node
+// Session-Bot: steuert Claude-Code-Sessions auf dem Server per Telegram.
+// Jede normale Nachricht ist ein Auftrag an die aktive Session.
+// Befehle: /neu [projekt|/pfad] [Auftrag], /projekte [add name /pfad], /modus [name],
+//          /sessions, /wechsel N, /status, /clear, /ende
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { execFile } from "node:child_process";
+
+const TOKEN = process.env.BOT_TOKEN;
+const CHAT_ID = Number(process.env.CHAT_ID);
+const API = `https://api.telegram.org/bot${TOKEN}`;
+const REG = "/root/.claude-sessions.json";
+const PROJ = "/root/.config/claude-projekte.json";
+const PERM_DIR = "/root/.perm";
+const DEFAULT_CWD = "/root/vault";            // &lt;- Standard-Arbeitsverzeichnis anpassen
+const DEFAULT_MODE = "acceptEdits";
+const CLAUDE = "/root/.local/bin/claude";
+const HOST = "&lt;DEIN-SERVER&gt;";                 // &lt;- eigener Hostname, nur fuer /status
+const ENV = { ...process.env, HOME: "/root", MCP_TOOL_TIMEOUT: "360000", PATH: "/root/.local/bin:" + (process.env.PATH || "/usr/bin:/bin") };
+
+// Telegram-Name -&gt; claude --permission-mode
+const MODI = { standard: "default", edits: "acceptEdits", plan: "plan", voll: "bypassPermissions" };
+const modusName = (wert) =&gt; (Object.entries(MODI).find(([, v]) =&gt; v === (wert || DEFAULT_MODE)) || ["edits"])[0];
+
+const load = () =&gt; { try { return JSON.parse(readFileSync(REG, "utf8")); } catch { return { sessions: [], aktiv: null, naechstesCwd: null, naechsterModus: null }; } };
+const save = (r) =&gt; writeFileSync(REG, JSON.stringify(r, null, 2));
+const loadProj = () =&gt; { try { return JSON.parse(readFileSync(PROJ, "utf8")); } catch { return { vault: DEFAULT_CWD }; } };
+const saveProj = (p) =&gt; writeFileSync(PROJ, JSON.stringify(p, null, 2));
+const kurz = (cwd) =&gt; {
+  const c = cwd || DEFAULT_CWD;
+  const hit = Object.entries(loadProj()).find(([, v]) =&gt; v === c);
+  return hit ? hit[0] : c.split("/").filter(Boolean).pop();
+};
+const wann = (t) =&gt; new Date(t).toLocaleString("de-DE", { timeZone: "Europe/Berlin", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+const DAUER = "Antwort kommt meist unter einer Minute, groessere Auftraege brauchen laenger.";
+
+async function send(text) {
+  let s = String(text ?? "").trim() || "(leere Antwort)";
+  if (s.length &gt; 15200) s = s.slice(0, 15200) + "\n[gekuerzt]";
+  for (let i = 0; i &lt; s.length; i += 3800) {
+    await fetch(`${API}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: CHAT_ID, text: s.slice(i, i + 3800) }) });
+  }
+}
+
+function runClaude(auftrag, resumeId, cwd, modus) {
+  return new Promise((resolve) =&gt; {
+    const args = ["-p", auftrag, "--output-format", "json", "--permission-mode", modus || DEFAULT_MODE,
+      "--allowedTools", "WebSearch,WebFetch",
+      "--permission-prompt-tool", "mcp__perm__approve",
+      "--mcp-config", "/root/bin/perm-mcp.json"];
+    if (resumeId) args.push("--resume", resumeId);
+    execFile(CLAUDE, args, { cwd: cwd || DEFAULT_CWD, env: ENV, timeout: 1800000, maxBuffer: 16 * 1024 * 1024 }, (e, out) =&gt; {
+      if (e &amp;&amp; !out) return resolve({ ok: false, error: String((e &amp;&amp; e.message) || e).slice(0, 400) });
+      try {
+        const j = JSON.parse(out);
+        resolve({ ok: true, result: j.result || "(kein Ergebnis)", sid: j.session_id || resumeId || null });
+      } catch {
+        resolve({ ok: false, error: "Antwort nicht lesbar: " + String(out).slice(0, 300) });
+      }
+    });
+  });
+}
+
+const queue = [];
+let busy = false;
+async function pump() {
+  if (busy) return;
+  busy = true;
+  while (queue.length) {
+    const item = queue.shift();
+    const reg = load();
+    const cur = reg.sessions.find((s) =&gt; s.id === reg.aktiv) || null;
+    const cwd = cur ? (cur.cwd || DEFAULT_CWD) : (item.cwd || reg.naechstesCwd || DEFAULT_CWD);
+    const modus = cur ? (cur.modus || DEFAULT_MODE) : (reg.naechsterModus || DEFAULT_MODE);
+    const r = await runClaude(item.text, cur ? cur.id : null, cwd, modus);
+    if (!r.ok) { await send("Fehlgeschlagen: " + r.error); continue; }
+    const reg2 = load();
+    if (cur) {
+      // resume liefert eine neue Session-ID: uebernehmen, sonst setzt der naechste Auftrag am alten Punkt an
+      const s = reg2.sessions.find((x) =&gt; x.id === cur.id);
+      if (s) { s.id = r.sid || s.id; s.zuletzt = Date.now(); }
+      if (reg2.aktiv === cur.id) reg2.aktiv = r.sid || cur.id;
+    } else if (r.sid &amp;&amp; !reg2.sessions.some((x) =&gt; x.id === r.sid)) {
+      reg2.sessions.push({ id: r.sid, titel: item.text.slice(0, 48), cwd, modus, erstellt: Date.now(), zuletzt: Date.now() });
+      if (reg2.sessions.length &gt; 15) reg2.sessions = reg2.sessions.slice(-15);
+      if (!reg2.aktiv) reg2.aktiv = r.sid;
+      reg2.naechstesCwd = null;
+      reg2.naechsterModus = null;
+    }
+    save(reg2);
+    await send(r.result);
+  }
+  busy = false;
+}
+
+let offset = 0;
+console.log(new Date().toISOString(), "Session-Bot gestartet");
+while (true) {
+  try {
+    const res = await fetch(`${API}/getUpdates?timeout=50&amp;offset=${offset}`);
+    const data = await res.json();
+    for (const u of data.result ?? []) {
+      offset = u.update_id + 1;
+
+      if (u.callback_query) {
+        const cq = u.callback_query;
+        let note = "Unbekannte Aktion";
+        if (cq.from.id === CHAT_ID &amp;&amp; cq.data &amp;&amp; cq.data.startsWith("perm:")) {
+          const teile = cq.data.split(":");
+          const id = teile[1] || "", antwort = teile[2] === "ja" ? "ja" : "nein";
+          if (/^[a-z0-9]+$/i.test(id)) {
+            try {
+              mkdirSync(PERM_DIR, { recursive: true });
+              writeFileSync(`${PERM_DIR}/${id}`, antwort);
+              note = antwort === "ja" ? "Erlaubt" : "Abgelehnt";
+              if (cq.message) {
+                const orig = cq.message.text || "Berechtigungsanfrage";
+                await fetch(`${API}/editMessageText`, { method: "POST", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ chat_id: CHAT_ID, message_id: cq.message.message_id,
+                    text: ((antwort === "ja" ? "ERLAUBT - Claude fuehrt aus:\n" : "ABGELEHNT - Claude ueberspringt:\n") + orig).slice(0, 4000) }) }).catch(() =&gt; {});
+              }
+            }
+            catch (e) { console.error(new Date().toISOString(), "Perm:", (e &amp;&amp; e.message) || e); note = "Fehler"; }
+          }
+        }
+        await fetch(`${API}/answerCallbackQuery`, { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ callback_query_id: cq.id, text: note }) });
+        continue;
+      }
+
+      const msg = u.message;
+      if (!msg?.text || msg.chat.id !== CHAT_ID) continue;
+      const text = msg.text.trim();
+      const reg = load();
+      const cur = reg.sessions.find((s) =&gt; s.id === reg.aktiv) || null;
+
+      if (text === "/start") {
+        await send("Session-Bot bereit. Jede Nachricht ist ein Auftrag an die aktive Claude-Session. Befehle:\n/neu [projekt] [Auftrag] - neue Session, Verzeichnis waehlbar\n/projekte - Verzeichnisse zeigen, mit add registrieren\n/modus [standard|edits|plan|voll] - Berechtigungsmodus je Session\n/sessions - alle Sessions\n/wechsel N - Session wechseln\n/status - Stand plus SSH-Befehl zum Fortsetzen am Rechner\n/clear - Kontext leeren, frisch im selben Verzeichnis\n/ende - aktive Session ablegen\nWeb-Suche ist erlaubt. Braucht Claude weitere Rechte, kommt eine Freigabe-Anfrage mit Buttons. " + DAUER);
+        continue;
+      }
+      if (text === "/modus" || text.startsWith("/modus ")) {
+        const arg = text.slice(6).trim().toLowerCase();
+        if (!arg) {
+          await send(`Aktueller Modus${cur ? ` der Session "${cur.titel}"` : " fuer die naechste Session"}: ${cur ? modusName(cur.modus) : modusName(reg.naechsterModus)}\n\nVerfuegbar:\nstandard - alles ausser Lesen fragt per Button an, auch Dateiaenderungen\nedits - Dateiaenderungen automatisch, Rest per Button (Standard)\nplan - nur lesen und planen, aendert nichts\nvoll - keine Nachfragen (Vorsicht)`);
+        } else if (!MODI[arg]) {
+          await send("Unbekannter Modus. Verfuegbar: standard, edits, plan, voll");
+        } else {
+          if (cur) {
+            const s = reg.sessions.find((x) =&gt; x.id === cur.id);
+            if (s) s.modus = MODI[arg];
+            save(reg);
+            await send(`Modus fuer "${cur.titel}": ${arg}${arg === "voll" ? "\nVorsicht: Claude fragt in dieser Session nichts mehr an." : ""}`);
+          } else {
+            reg.naechsterModus = MODI[arg]; save(reg);
+            await send(`Modus fuer die naechste Session: ${arg}${arg === "voll" ? "\nVorsicht: Claude fragt in dieser Session nichts mehr an." : ""}`);
+          }
+        }
+        continue;
+      }
+      if (text === "/projekte" || text.startsWith("/projekte ")) {
+        const teile = text.split(/\s+/);
+        if (teile[1] === "add" &amp;&amp; teile[2] &amp;&amp; teile[3]) {
+          const name = teile[2].toLowerCase(); const pfad = teile[3];
+          if (!existsSync(pfad)) { await send(`Verzeichnis ${pfad} existiert nicht auf dem Server.`); continue; }
+          const p = loadProj(); p[name] = pfad; saveProj(p);
+          await send(`Registriert: ${name} -&gt; ${pfad}\nNutzen mit /neu ${name} [Auftrag]`);
+        } else {
+          const p = loadProj();
+          await send("Projekte:\n" + Object.entries(p).map(([k, v]) =&gt; `${k} -&gt; ${v}`).join("\n") + "\n\nNeues registrieren: /projekte add name /absoluter/pfad");
+        }
+        continue;
+      }
+      if (text === "/sessions") {
+        if (!reg.sessions.length) { await send("Keine Sessions. Schick einfach einen Auftrag oder /neu."); continue; }
+        const zeilen = reg.sessions.map((s, i) =&gt; `${i + 1}. ${s.titel} [${kurz(s.cwd)}, ${modusName(s.modus)}] - zuletzt ${wann(s.zuletzt)}${s.id === reg.aktiv ? " (aktiv)" : ""}`);
+        await send(zeilen.join("\n") + "\nWechseln mit /wechsel N");
+        continue;
+      }
+      if (text.startsWith("/wechsel")) {
+        const n = parseInt(text.split(/\s+/)[1], 10);
+        const ziel = reg.sessions[n - 1];
+        if (!ziel) { await send("Unbekannte Nummer. /sessions zeigt die Liste."); continue; }
+        reg.aktiv = ziel.id; save(reg);
+        await send(`Aktiv: ${ziel.titel} [${kurz(ziel.cwd)}, ${modusName(ziel.modus)}]`);
+        continue;
+      }
+      if (text === "/status") {
+        const lage = busy ? `Ein Auftrag laeuft gerade${queue.length ? `, ${queue.length} in Warteschlange` : ""}.` : "Bereit.";
+        if (cur) {
+          await send(`Aktive Session: ${cur.titel}\nVerzeichnis: ${cur.cwd || DEFAULT_CWD}\nModus: ${modusName(cur.modus)}\nZuletzt: ${wann(cur.zuletzt)}\n${lage}\n\nAm Rechner fortsetzen:\nssh root@${HOST}\ncd "${cur.cwd || DEFAULT_CWD}" &amp;&amp; claude --resume ${cur.id}`);
+        } else {
+          await send(`Keine aktive Session. ${lage}`);
+        }
+        continue;
+      }
+      if (text === "/clear") {
+        if (!cur) { await send("Keine aktive Session. /neu startet frisch."); continue; }
+        reg.sessions = reg.sessions.filter((s) =&gt; s.id !== cur.id);
+        reg.aktiv = null; reg.naechstesCwd = cur.cwd || DEFAULT_CWD; reg.naechsterModus = cur.modus || null; save(reg);
+        await send(`Kontext geleert. Deine naechste Nachricht startet frisch in ${kurz(cur.cwd)} (Modus ${modusName(cur.modus)}).`);
+        continue;
+      }
+      if (text === "/ende") {
+        if (!cur) { await send("Keine aktive Session."); continue; }
+        reg.sessions = reg.sessions.filter((s) =&gt; s.id !== cur.id);
+        reg.aktiv = null; save(reg);
+        await send(`Abgelegt: ${cur.titel}. Das Transkript bleibt auf dem Server erhalten.`);
+        continue;
+      }
+      if (text === "/neu" || text.startsWith("/neu ")) {
+        const rest = text.slice(4).trim();
+        const projekte = loadProj();
+        let cwd = null, auftrag = rest;
+        const erst = rest.split(/\s+/)[0] || "";
+        if (projekte[erst.toLowerCase()]) { cwd = projekte[erst.toLowerCase()]; auftrag = rest.slice(erst.length).trim(); }
+        else if (erst.startsWith("/") &amp;&amp; existsSync(erst)) { cwd = erst; auftrag = rest.slice(erst.length).trim(); }
+        if (cwd &amp;&amp; !existsSync(cwd)) { await send(`Verzeichnis ${cwd} existiert nicht mehr. /projekte zeigt die Liste.`); continue; }
+        reg.aktiv = null; reg.naechstesCwd = cwd; save(reg);
+        if (auftrag) { queue.push({ text: auftrag, cwd }); await send(`Neue Session in ${kurz(cwd)} wird eroeffnet, Auftrag laeuft. ${DAUER}`); pump(); }
+        else await send(`Alles klar, deine naechste Nachricht eroeffnet eine neue Session in ${kurz(cwd)} (Modus ${modusName(reg.naechsterModus)}).`);
+        continue;
+      }
+      queue.push({ text, cwd: null });
+      await send(busy ? `Eingereiht, Position ${queue.length}.` : cur ? `Auftrag laeuft in "${cur.titel}" [${kurz(cur.cwd)}, ${modusName(cur.modus)}]. ${DAUER}` : `Neue Session in ${kurz(reg.naechstesCwd)} wird eroeffnet (Modus ${modusName(reg.naechsterModus)}), Auftrag laeuft. ${DAUER}`);
+      pump();
+    }
+  } catch (e) { console.error(new Date().toISOString(), "Loop:", (e &amp;&amp; e.message) || e); await new Promise((r) =&gt; setTimeout(r, 5000)); }
+}</code></pre>
+<h3 id="3-8-systemd-dienst-anlegen-etc-systemd-system-telegram-session-service">3.8 systemd-Dienst anlegen: <code>/etc/systemd/system/telegram-session.service</code></h3>
+<pre data-lang="ini"><code>[Unit]
+Description=Telegram Claude Session Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/root/.config/telegram-session.env
+ExecStart=/usr/bin/node /root/bin/telegram-session.mjs
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target</code></pre>
+<h3 id="3-9-starten-und-testen">3.9 Starten und testen</h3>
+<pre data-lang="bash"><code>chmod +x /root/bin/telegram-session.mjs /root/bin/permission-mcp.mjs
+node --check /root/bin/telegram-session.mjs &amp;&amp; node --check /root/bin/permission-mcp.mjs
+systemctl daemon-reload
+systemctl enable --now telegram-session
+systemctl is-active telegram-session      # -&gt; active
+journalctl -u telegram-session -f         # Log live</code></pre>
+<p>Testfolge in Telegram:</p>
+<ol>
+<li><code>/start</code> → Hilfe kommt</li>
+<li>„Wie ist das Wetter in Hamburg?" → erste Session entsteht, Antwort mit Websuche</li>
+<li>„Führe uptime aus" → läuft ohne Nachfrage (read-only)</li>
+<li>„Lege /root/test per touch an" → Freigabe-Button erscheint, nach „Erlauben" wird ausgeführt und die Nachricht zeigt ERLAUBT</li>
+</ol>
+<h2 id="4-referenz-befehle-modi-parameter">4. Referenz: Befehle, Modi, Parameter</h2>
+<h3 id="telegram-befehle">Telegram-Befehle</h3>
+<table><tr><th>Befehl</th><th>Wirkung</th></tr><tr><td>*(normale Nachricht)*</td><td>Auftrag an die aktive Session; ohne aktive Session wird automatisch eine neue eröffnet</td></tr><tr><td>`/neu [projekt\</td><td>/pfad] [Auftrag]`</td><td>Neue Session, optional in registriertem Projekt oder absolutem Pfad, optional direkt mit Auftrag</td></tr><tr><td><code>/projekte</code></td><td>Registrierte Verzeichnisse anzeigen</td></tr><tr><td><code>/projekte add name /pfad</code></td><td>Verzeichnis unter Kurznamen registrieren</td></tr><tr><td><code>/modus [name]</code></td><td>Berechtigungsmodus anzeigen bzw. für aktive/nächste Session setzen</td></tr><tr><td><code>/sessions</code></td><td>Alle Sessions mit Verzeichnis, Modus, letzter Nutzung</td></tr><tr><td><code>/wechsel N</code></td><td>Aktive Session wechseln (Nummer aus /sessions)</td></tr><tr><td><code>/status</code></td><td>Aktive Session, Verzeichnis, Modus, Auslastung, fertiger SSH-Befehl zum Fortsetzen am Rechner</td></tr><tr><td><code>/clear</code></td><td>Kontext leeren: Session ablegen, nächste Nachricht startet frisch im selben Verzeichnis</td></tr><tr><td><code>/ende</code></td><td>Aktive Session ablegen (Transkript bleibt unter <code>~/.claude/projects/</code> erhalten)</td></tr></table>
+<h3 id="berechtigungsmodi-modus">Berechtigungsmodi (<code>/modus</code>)</h3>
+<table><tr><th>Name</th><th>claude-Wert</th><th>Verhalten</th></tr><tr><td><code>standard</code></td><td><code>default</code></td><td>Alles außer Lesen fragt per Button an, auch Dateiänderungen</td></tr><tr><td><code>edits</code></td><td><code>acceptEdits</code></td><td>Dateiänderungen automatisch, Shell &amp; Co. per Button — Standard</td></tr><tr><td><code>plan</code></td><td><code>plan</code></td><td>Nur lesen und planen, ändert nichts</td></tr><tr><td><code>voll</code></td><td><code>bypassPermissions</code></td><td>Keine Nachfragen; Claude verweigert das unter root ggf.</td></tr></table>
+<h3 id="stellschrauben">Stellschrauben</h3>
+<table><tr><th>Wo</th><th>Was</th><th>Bedeutung</th></tr><tr><td><code>telegram-session.env</code></td><td><code>BOT_TOKEN</code>, <code>CHAT_ID</code></td><td>Bot-Zugang; die Chat-ID ist die einzige Zugriffsschranke</td></tr><tr><td>Bot-Script</td><td><code>DEFAULT_CWD</code></td><td>Standard-Arbeitsverzeichnis neuer Sessions</td></tr><tr><td>Bot-Script</td><td><code>HOST</code></td><td>Servername für den SSH-Hinweis in <code>/status</code></td></tr><tr><td>Bot-Script</td><td><code>MCP_TOOL_TIMEOUT: "360000"</code></td><td>6 Minuten — muss größer sein als die Button-Wartezeit, sonst bricht Claude die Freigabe-Anfrage nach ~30 s ab (der wichtigste nicht offensichtliche Wert!)</td></tr><tr><td>Bot-Script</td><td><code>timeout: 1800000</code></td><td>Maximaldauer eines Claude-Laufs (30 Min)</td></tr><tr><td>Bot-Script</td><td><code>--allowedTools "WebSearch,WebFetch"</code></td><td>Fest erlaubte Tools ohne Button</td></tr><tr><td>MCP-Script</td><td><code>300000</code> in <code>frage()</code></td><td>Wartezeit auf den Button (5 Min), danach automatisch abgelehnt</td></tr><tr><td><code>claude-projekte.json</code></td><td>Name → Pfad</td><td>Projekt-Kurznamen für <code>/neu</code></td></tr><tr><td>Register <code>.claude-sessions.json</code></td><td>max. 15 Sessions</td><td>Älteste fliegen raus (Transkripte bleiben)</td></tr></table>
+<h3 id="sicherheit">Sicherheit</h3>
+<ul>
+<li><strong>Die Chat-ID-Whitelist ist die einzige Schranke</strong> — Token geheim halten, Bot-Namen nicht öffentlich teilen. Token kompromittiert: bei @BotFather <code>/revoke</code>, neuen Token in die env, Dienst neu starten</li>
+<li>Kein offener Port nötig: Long Polling nutzt nur ausgehende HTTPS-Verbindungen — Firewall kann komplett zu bleiben (nur SSH)</li>
+<li>Wer dem Bot schreiben darf, kann Claude Aufträge mit Schreibzugriff auf den Server geben — entsprechend behandeln</li>
+<li>Antworten auf abgelaufene Freigaben sind harmlos: Die Buttons werden beim Ablauf entfernt</li>
+</ul>
+<h3 id="bekannte-eigenheiten">Bekannte Eigenheiten</h3>
+<ul>
+<li><code>--resume</code> erzeugt je Aufruf eine neue Session-ID (Fork) — der Bot verwaltet das; beim manuellen Fortsetzen per SSH die ID immer frisch aus <code>/status</code> nehmen</li>
+<li>Read-only-Shell-Befehle laufen ohne Freigabe durch (Claude-eigene Einstufung)</li>
+<li>Antwortzeit einfacher Aufträge: gemessen 13–38 Sekunden; lange Antworten werden auf mehrere Telegram-Nachrichten gesplittet (Limit 4096 Zeichen)</li>
+<li>Je Zeitpunkt läuft genau ein Auftrag; weitere Nachrichten werden eingereiht und danach abgearbeitet</li>
+</ul>
+<footer>Stand 03.09.2026 · Alle persönlichen Werte sind Platzhalter: &lt;BOT_TOKEN&gt;, &lt;CHAT_ID&gt;, &lt;DEIN-SERVER&gt;</footer>
+</div>
+</body>
+</html>

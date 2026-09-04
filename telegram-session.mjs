@@ -1,9 +1,12 @@
 #!/usr/bin/env node
-// Session-Bot v5: steuert Claude-Code-Sessions auf dem VPS per Telegram.
+// Session-Bot v6.1: steuert Claude-Code-Sessions auf dem VPS per Telegram.
 // Jede normale Nachricht ist ein Auftrag an die aktive Session.
 // v2: Projektverzeichnis waehlbar. v3: /clear, Web-Zugriff, Freigabe-Buttons. v4: /modus je Session.
 // v5: Button-Klick editiert die Anfrage-Nachricht (ERLAUBT/ABGELEHNT sichtbar), realistische Antwortzeit-Ansagen.
-// Befehle: /neu [projekt|/pfad] [Auftrag], /projekte [add name /pfad], /modus [name], /sessions, /wechsel N, /status, /clear, /ende
+// v6: /modell-Befehl - Sprachmodell je Session waehlbar (opus, sonnet, haiku, standard).
+// v6.1: stdin sofort geschlossen (spart 3s Wartezeit je Auftrag), Fehlertexte zeigen das Ende der Meldung statt des Kommando-Echos.
+// Hinweis: Der Modus "voll" (bypassPermissions) funktioniert nicht, wenn der Bot als root laeuft - Claude Code verweigert das grundsaetzlich.
+// Befehle: /neu [projekt|/pfad] [Auftrag], /projekte [add name /pfad], /modus [name], /modell [name], /sessions, /wechsel N, /status, /clear, /ende
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { execFile } from "node:child_process";
 
@@ -23,7 +26,11 @@ const ENV = { ...process.env, HOME: "/root", MCP_TOOL_TIMEOUT: "360000", PATH: "
 const MODI = { standard: "default", edits: "acceptEdits", plan: "plan", voll: "bypassPermissions" };
 const modusName = (wert) => (Object.entries(MODI).find(([, v]) => v === (wert || DEFAULT_MODE)) || ["edits"])[0];
 
-const load = () => { try { return JSON.parse(readFileSync(REG, "utf8")); } catch { return { sessions: [], aktiv: null, naechstesCwd: null, naechsterModus: null }; } };
+// Telegram-Name -> claude --model. null bedeutet: kein Flag, Claude Code entscheidet
+const MODELLE = { opus: "claude-opus-5", sonnet: "claude-sonnet-5", haiku: "claude-haiku-4-5" };
+const modellName = (wert) => (Object.entries(MODELLE).find(([, v]) => v === wert) || ["standard"])[0];
+
+const load = () => { try { return JSON.parse(readFileSync(REG, "utf8")); } catch { return { sessions: [], aktiv: null, naechstesCwd: null, naechsterModus: null, naechstesModell: null }; } };
 const save = (r) => writeFileSync(REG, JSON.stringify(r, null, 2));
 const loadProj = () => { try { return JSON.parse(readFileSync(PROJ, "utf8")); } catch { return { vault: DEFAULT_CWD }; } };
 const saveProj = (p) => writeFileSync(PROJ, JSON.stringify(p, null, 2));
@@ -44,15 +51,17 @@ async function send(text) {
   }
 }
 
-function runClaude(auftrag, resumeId, cwd, modus) {
+function runClaude(auftrag, resumeId, cwd, modus, modell) {
   return new Promise((resolve) => {
     const args = ["-p", auftrag, "--output-format", "json", "--permission-mode", modus || DEFAULT_MODE,
       "--allowedTools", "WebSearch,WebFetch",
       "--permission-prompt-tool", "mcp__perm__approve",
       "--mcp-config", "/root/bin/perm-mcp.json"];
+    if (modell) args.push("--model", modell);
     if (resumeId) args.push("--resume", resumeId);
-    execFile(CLAUDE, args, { cwd: cwd || DEFAULT_CWD, env: ENV, timeout: 1800000, maxBuffer: 16 * 1024 * 1024 }, (e, out) => {
-      if (e && !out) return resolve({ ok: false, error: String((e && e.message) || e).slice(0, 400) });
+    const kind = execFile(CLAUDE, args, { cwd: cwd || DEFAULT_CWD, env: ENV, timeout: 1800000, maxBuffer: 16 * 1024 * 1024 }, (e, out) => {
+      // Fehlertexte: das Ende der Meldung zeigen, nicht das Kommando-Echo am Anfang
+      if (e && !out) return resolve({ ok: false, error: String((e && e.message) || e).slice(-400) });
       try {
         const j = JSON.parse(out);
         resolve({ ok: true, result: j.result || "(kein Ergebnis)", sid: j.session_id || resumeId || null });
@@ -60,6 +69,7 @@ function runClaude(auftrag, resumeId, cwd, modus) {
         resolve({ ok: false, error: "Antwort nicht lesbar: " + String(out).slice(0, 300) });
       }
     });
+    kind.stdin.end(); // sonst wartet Claude 3 Sekunden auf stdin
   });
 }
 
@@ -74,7 +84,8 @@ async function pump() {
     const cur = reg.sessions.find((s) => s.id === reg.aktiv) || null;
     const cwd = cur ? (cur.cwd || DEFAULT_CWD) : (item.cwd || reg.naechstesCwd || DEFAULT_CWD);
     const modus = cur ? (cur.modus || DEFAULT_MODE) : (reg.naechsterModus || DEFAULT_MODE);
-    const r = await runClaude(item.text, cur ? cur.id : null, cwd, modus);
+    const modell = cur ? (cur.modell || null) : (reg.naechstesModell || null);
+    const r = await runClaude(item.text, cur ? cur.id : null, cwd, modus, modell);
     if (!r.ok) { await send("Fehlgeschlagen: " + r.error); continue; }
     const reg2 = load();
     if (cur) {
@@ -83,11 +94,12 @@ async function pump() {
       if (s) { s.id = r.sid || s.id; s.zuletzt = Date.now(); }
       if (reg2.aktiv === cur.id) reg2.aktiv = r.sid || cur.id;
     } else if (r.sid && !reg2.sessions.some((x) => x.id === r.sid)) {
-      reg2.sessions.push({ id: r.sid, titel: item.text.slice(0, 48), cwd, modus, erstellt: Date.now(), zuletzt: Date.now() });
+      reg2.sessions.push({ id: r.sid, titel: item.text.slice(0, 48), cwd, modus, modell, erstellt: Date.now(), zuletzt: Date.now() });
       if (reg2.sessions.length > 15) reg2.sessions = reg2.sessions.slice(-15);
       if (!reg2.aktiv) reg2.aktiv = r.sid;
       reg2.naechstesCwd = null;
       reg2.naechsterModus = null;
+      reg2.naechstesModell = null;
     }
     save(reg2);
     await send(r.result);
@@ -96,7 +108,7 @@ async function pump() {
 }
 
 let offset = 0;
-console.log(new Date().toISOString(), "Session-Bot v5 gestartet");
+console.log(new Date().toISOString(), "Session-Bot v6.1 gestartet");
 while (true) {
   try {
     const res = await fetch(`${API}/getUpdates?timeout=50&offset=${offset}`);
@@ -138,13 +150,13 @@ while (true) {
       const cur = reg.sessions.find((s) => s.id === reg.aktiv) || null;
 
       if (text === "/start") {
-        await send("Session-Bot bereit. Jede Nachricht ist ein Auftrag an die aktive Claude-Session. Befehle:\n/neu [projekt] [Auftrag] - neue Session, Verzeichnis waehlbar\n/projekte - Verzeichnisse zeigen, mit add registrieren\n/modus [standard|edits|plan|voll] - Berechtigungsmodus je Session\n/sessions - alle Sessions\n/wechsel N - Session wechseln\n/status - Stand plus SSH-Befehl zum Fortsetzen am Rechner\n/clear - Kontext leeren, frisch im selben Verzeichnis\n/ende - aktive Session ablegen\nWeb-Suche ist erlaubt. Braucht Claude weitere Rechte, kommt eine Freigabe-Anfrage mit Buttons (5 Minuten Zeit, dein Klick wird direkt in der Nachricht bestaetigt). " + DAUER);
+        await send("Session-Bot bereit. Jede Nachricht ist ein Auftrag an die aktive Claude-Session. Befehle:\n/neu [projekt] [Auftrag] - neue Session, Verzeichnis waehlbar\n/projekte - Verzeichnisse zeigen, mit add registrieren\n/modus [standard|edits|plan|voll] - Berechtigungsmodus je Session\n/modell [opus|sonnet|haiku|standard] - Sprachmodell je Session\n/sessions - alle Sessions\n/wechsel N - Session wechseln\n/status - Stand plus SSH-Befehl zum Fortsetzen am Rechner\n/clear - Kontext leeren, frisch im selben Verzeichnis\n/ende - aktive Session ablegen\nWeb-Suche ist erlaubt. Braucht Claude weitere Rechte, kommt eine Freigabe-Anfrage mit Buttons (5 Minuten Zeit, dein Klick wird direkt in der Nachricht bestaetigt). " + DAUER);
         continue;
       }
       if (text === "/modus" || text.startsWith("/modus ")) {
         const arg = text.slice(6).trim().toLowerCase();
         if (!arg) {
-          await send(`Aktueller Modus${cur ? ` der Session "${cur.titel}"` : " fuer die naechste Session"}: ${cur ? modusName(cur.modus) : modusName(reg.naechsterModus)}\n\nVerfuegbar:\nstandard - alles ausser Lesen fragt per Button an, auch Dateiaenderungen\nedits - Dateiaenderungen automatisch, Rest per Button (Standard)\nplan - nur lesen und planen, aendert nichts\nvoll - keine Nachfragen (Vorsicht)`);
+          await send(`Aktueller Modus${cur ? ` der Session "${cur.titel}"` : " fuer die naechste Session"}: ${cur ? modusName(cur.modus) : modusName(reg.naechsterModus)}\n\nVerfuegbar:\nstandard - alles ausser Lesen fragt per Button an, auch Dateiaenderungen\nedits - Dateiaenderungen automatisch, Rest per Button (Standard)\nplan - nur lesen und planen, aendert nichts\nvoll - keine Nachfragen (Vorsicht; funktioniert nicht, wenn der Bot als root laeuft)`);
         } else if (!MODI[arg]) {
           await send("Unbekannter Modus. Verfuegbar: standard, edits, plan, voll");
         } else {
@@ -152,10 +164,30 @@ while (true) {
             const s = reg.sessions.find((x) => x.id === cur.id);
             if (s) s.modus = MODI[arg];
             save(reg);
-            await send(`Modus fuer "${cur.titel}": ${arg}${arg === "voll" ? "\nVorsicht: Claude fragt in dieser Session nichts mehr an." : ""}`);
+            await send(`Modus fuer "${cur.titel}": ${arg}${arg === "voll" ? "\nVorsicht: Claude fragt in dieser Session nichts mehr an. Laeuft der Bot als root, verweigert Claude Code diesen Modus komplett." : ""}`);
           } else {
             reg.naechsterModus = MODI[arg]; save(reg);
-            await send(`Modus fuer die naechste Session: ${arg}${arg === "voll" ? "\nVorsicht: Claude fragt in dieser Session nichts mehr an." : ""}`);
+            await send(`Modus fuer die naechste Session: ${arg}${arg === "voll" ? "\nVorsicht: Claude fragt in dieser Session nichts mehr an. Laeuft der Bot als root, verweigert Claude Code diesen Modus komplett." : ""}`);
+          }
+        }
+        continue;
+      }
+      if (text === "/modell" || text.startsWith("/modell ")) {
+        const arg = text.slice(7).trim().toLowerCase();
+        if (!arg) {
+          await send(`Aktuelles Modell${cur ? ` der Session "${cur.titel}"` : " fuer die naechste Session"}: ${cur ? modellName(cur.modell) : modellName(reg.naechstesModell)}\n\nVerfuegbar:\nopus - staerkstes Modell, fuer Bauauftraege\nsonnet - schnell und guenstig, fuer Erfassung\nhaiku - am schnellsten, fuer kurze Handgriffe\nstandard - keine Vorgabe`);
+        } else if (arg !== "standard" && !MODELLE[arg]) {
+          await send("Unbekanntes Modell. Verfuegbar: opus, sonnet, haiku, standard");
+        } else {
+          const wert = arg === "standard" ? null : MODELLE[arg];
+          if (cur) {
+            const s = reg.sessions.find((x) => x.id === cur.id);
+            if (s) s.modell = wert;
+            save(reg);
+            await send(`Modell fuer "${cur.titel}": ${arg}`);
+          } else {
+            reg.naechstesModell = wert; save(reg);
+            await send(`Modell fuer die naechste Session: ${arg}`);
           }
         }
         continue;
@@ -175,7 +207,7 @@ while (true) {
       }
       if (text === "/sessions") {
         if (!reg.sessions.length) { await send("Keine Sessions. Schick einfach einen Auftrag oder /neu."); continue; }
-        const zeilen = reg.sessions.map((s, i) => `${i + 1}. ${s.titel} [${kurz(s.cwd)}, ${modusName(s.modus)}] - zuletzt ${wann(s.zuletzt)}${s.id === reg.aktiv ? " (aktiv)" : ""}`);
+        const zeilen = reg.sessions.map((s, i) => `${i + 1}. ${s.titel} [${kurz(s.cwd)}, ${modusName(s.modus)}, ${modellName(s.modell)}] - zuletzt ${wann(s.zuletzt)}${s.id === reg.aktiv ? " (aktiv)" : ""}`);
         await send(zeilen.join("\n") + "\nWechseln mit /wechsel N");
         continue;
       }
@@ -184,13 +216,13 @@ while (true) {
         const ziel = reg.sessions[n - 1];
         if (!ziel) { await send("Unbekannte Nummer. /sessions zeigt die Liste."); continue; }
         reg.aktiv = ziel.id; save(reg);
-        await send(`Aktiv: ${ziel.titel} [${kurz(ziel.cwd)}, ${modusName(ziel.modus)}]`);
+        await send(`Aktiv: ${ziel.titel} [${kurz(ziel.cwd)}, ${modusName(ziel.modus)}, ${modellName(ziel.modell)}]`);
         continue;
       }
       if (text === "/status") {
         const lage = busy ? `Ein Auftrag laeuft gerade${queue.length ? `, ${queue.length} in Warteschlange` : ""}.` : "Bereit.";
         if (cur) {
-          await send(`Aktive Session: ${cur.titel}\nVerzeichnis: ${cur.cwd || DEFAULT_CWD}\nModus: ${modusName(cur.modus)}\nZuletzt: ${wann(cur.zuletzt)}\n${lage}\n\nAm Rechner fortsetzen:\nssh root@${HOST}\ncd "${cur.cwd || DEFAULT_CWD}" && claude --resume ${cur.id}`);
+          await send(`Aktive Session: ${cur.titel}\nVerzeichnis: ${cur.cwd || DEFAULT_CWD}\nModus: ${modusName(cur.modus)}\nModell: ${modellName(cur.modell)}\nZuletzt: ${wann(cur.zuletzt)}\n${lage}\n\nAm Rechner fortsetzen:\nssh root@${HOST}\ncd "${cur.cwd || DEFAULT_CWD}" && claude --resume ${cur.id}`);
         } else {
           await send(`Keine aktive Session. ${lage}`);
         }
@@ -199,7 +231,7 @@ while (true) {
       if (text === "/clear") {
         if (!cur) { await send("Keine aktive Session. /neu startet frisch."); continue; }
         reg.sessions = reg.sessions.filter((s) => s.id !== cur.id);
-        reg.aktiv = null; reg.naechstesCwd = cur.cwd || DEFAULT_CWD; reg.naechsterModus = cur.modus || null; save(reg);
+        reg.aktiv = null; reg.naechstesCwd = cur.cwd || DEFAULT_CWD; reg.naechsterModus = cur.modus || null; reg.naechstesModell = cur.modell || null; save(reg);
         await send(`Kontext geleert. Deine naechste Nachricht startet frisch in ${kurz(cur.cwd)} (Modus ${modusName(cur.modus)}).`);
         continue;
       }

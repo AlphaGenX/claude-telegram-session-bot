@@ -10,6 +10,7 @@ Ein Telegram-Bot, der Claude-Code-Sessions auf einem Linux-Server steuert — Se
 - Sessions eröffnen, wechseln, auflisten, beenden: `/neu`, `/sessions`, `/wechsel`, `/clear`, `/ende`
 - Projektverzeichnis je Session wählbar: `/projekte`, `/neu <projekt> [Auftrag]`
 - Berechtigungsmodus je Session: `/modus standard|edits|plan|voll` (wie das Shift+Tab-Menü in Claude Code)
+- Sprachmodell je Session: `/modell opus|sonnet|haiku|standard` — Bauaufträge auf Opus, schnelle Handgriffe auf Haiku
 - Braucht Claude eine Berechtigung (z. B. Shell), kommt eine Telegram-Anfrage mit **Erlauben/Ablehnen-Buttons**; die Nachricht zeigt danach sichtbar ERLAUBT / ABGELEHNT / ABGELAUFEN
 - `/status` liefert den fertigen SSH-Befehl, um jede Session am Rechner als volle interaktive Claude-Code-Sitzung fortzusetzen
 - Web-Suche (`WebSearch`/`WebFetch`) ist fest erlaubt
@@ -35,6 +36,8 @@ Zwei Eigenheiten, die man kennen sollte:
 ## Installation
 
 Voraussetzungen: Linux-Server (getestet: Ubuntu 24.04), Node.js 22+, [Claude Code](https://code.claude.com/docs/en/setup) installiert und angemeldet (Pro/Max-Abo). Die Scripts nehmen Betrieb als `root` an — Pfade sonst anpassen.
+
+> **Wichtig:** Unter root verweigert Claude Code den Modus `voll` (`bypassPermissions`) grundsätzlich — die anderen drei Modi laufen normal. Wer `voll` braucht, betreibt Bot und Claude als eigenen unprivilegierten Benutzer (Unit mit `User=`, Pfade von `/root/…` auf das Home des Benutzers umstellen, Claude-Login unter diesem Benutzer). Angenehmer Nebeneffekt: Ein kompromittierter Bot hat keine root-Rechte.
 
 **Vorbereitung (2 Minuten):**
 1. In Telegram `@BotFather` anschreiben: `/newbot` → Token notieren
@@ -73,8 +76,9 @@ sudo bash install.sh          # fragt Token, Chat-ID, Hostname, Arbeitsverzeichn
 | *(Nachricht)* | Auftrag an die aktive Session; ohne aktive wird eine neue eröffnet |
 | `/neu [projekt\|/pfad] [Auftrag]` | Neue Session, Verzeichnis wählbar |
 | `/projekte` / `/projekte add name /pfad` | Verzeichnisse anzeigen / registrieren |
-| `/modus [standard\|edits\|plan\|voll]` | Berechtigungsmodus anzeigen bzw. setzen |
-| `/sessions` | Alle Sessions mit Verzeichnis und Modus |
+| `/modus [standard\|edits\|plan\|voll]` | Berechtigungsmodus anzeigen bzw. setzen (`voll` braucht einen Nicht-root-Betrieb) |
+| `/modell [opus\|sonnet\|haiku\|standard]` | Sprachmodell anzeigen bzw. setzen; gilt ab dem nächsten Auftrag |
+| `/sessions` | Alle Sessions mit Verzeichnis, Modus und Modell |
 | `/wechsel N` | Aktive Session wechseln |
 | `/status` | Stand + SSH-Befehl zum Fortsetzen am Rechner |
 | `/clear` | Kontext leeren, frisch im selben Verzeichnis |
@@ -87,6 +91,7 @@ sudo bash install.sh          # fragt Token, Chat-ID, Hostname, Arbeitsverzeichn
 | `telegram-session.env` | `BOT_TOKEN`, `CHAT_ID` | Zugang; die Chat-ID ist die einzige Schranke |
 | `telegram-session.mjs` | `DEFAULT_CWD`, `HOST` | Standard-Verzeichnis, Servername für `/status` |
 | `telegram-session.mjs` | `MCP_TOOL_TIMEOUT: "360000"` | Muss größer sein als die Button-Wartezeit |
+| `telegram-session.mjs` | `MODELLE` | Modell-IDs hinter `/modell` — bei neuen Claude-Versionen anpassen |
 | `permission-mcp.mjs` | `300000` in `frage()` | Wartezeit auf den Button (5 Min), danach abgelehnt |
 | `claude-projekte.json` | Name → Pfad | Projekt-Kurznamen für `/neu` |
 
@@ -95,6 +100,13 @@ sudo bash install.sh          # fragt Token, Chat-ID, Hostname, Arbeitsverzeichn
 - Die **Chat-ID-Whitelist ist die einzige Schranke** — Token geheim halten, Bot-Namen nicht öffentlich teilen. Bei Verdacht: `/revoke` bei @BotFather, neuen Token in die env, Dienst neu starten
 - Keine offenen Ports nötig: Long Polling nutzt nur ausgehende HTTPS-Verbindungen
 - Wer dem Bot schreiben darf, gibt Claude Aufträge mit Schreibzugriff auf den Server — entsprechend behandeln
+- **Empfehlung:** Bot und Claude als eigenen unprivilegierten Benutzer betreiben statt als root — begrenzt den Schaden eines missbrauchten Zugangs und schaltet nebenbei den Modus `voll` frei
+
+## Versionen
+
+- **v6.1** (2026-09-04): stdin des Claude-Prozesses wird sofort geschlossen (spart 3 Sekunden Wartezeit je Auftrag); Fehlermeldungen zeigen das Ende der Meldung statt des Kommando-Echos — da steht die Ursache
+- **v6** (2026-09-04): `/modell`-Befehl, Sprachmodell je Session
+- **v5** (2026-09-03): Erstveröffentlichung — Session-Verwaltung, Projektverzeichnisse, Freigabe-Buttons mit sichtbarem Feedback, `/modus`
 
 ## Lizenz
 

@@ -46,6 +46,7 @@ if systemctl is-active --quiet telegram-session; then
   echo ""
   echo "Fertig. Der Bot laeuft — schick ihm in Telegram /start."
   echo "Logs: journalctl -u telegram-session -f"
+  echo "Hinweis: Der Modus 'voll' funktioniert nicht unter root — Claude Code verweigert bypassPermissions mit root-Rechten. Dafuer den Bot als eigenen Benutzer betreiben."
 else
   echo "Dienst laeuft nicht — Log pruefen: journalctl -u telegram-session -n 20"
   exit 1

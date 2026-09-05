@@ -71,7 +71,7 @@ footer{margin-top:64px;padding-top:20px;border-top:1px solid var(--line);
 </header>
 <nav class="toc"><strong>Inhalt</strong><ul><li><a href="#1-was-ist-das">1. Was ist das?</a></li><li><a href="#2-wie-funktioniert-es">2. Wie funktioniert es?</a></li><li><a href="#3-nachbau-schritt-für-schritt">3. Nachbau Schritt für Schritt</a></li><li><a href="#4-referenz-befehle-modi-parameter">4. Referenz: Befehle, Modi, Parameter</a></li></ul></nav>
 <p>Eine Anleitung zum 1:1-Nachbau. Alle persönlichen Werte sind Platzhalter in spitzen Klammern: <code>&lt;BOT_TOKEN&gt;</code>, <code>&lt;CHAT_ID&gt;</code>, <code>&lt;DEIN-SERVER&gt;</code>.</p>
-<p><strong>Neu in v6/v6.1 (04.09.2026):</strong> <code>/modell</code> wählt das Sprachmodell je Session (Opus für Bauaufträge, Haiku für Handgriffe). v6.1 schließt stdin des Claude-Prozesses sofort (spart 3 Sekunden je Auftrag) und zeigt bei Fehlern das Ende der Meldung statt des Kommando-Echos. Außerdem in der Praxis bestätigt: <strong>Unter root funktioniert der Modus <code>voll</code> nicht</strong> — Claude Code verweigert <code>bypassPermissions</code> mit root-Rechten grundsätzlich. Wer <code>voll</code> will, betreibt den Bot als eigenen unprivilegierten Benutzer.</p>
+<p><strong>Neu in v7 (05.09.2026):</strong> <code>/usage</code> zeigt den Kontext-Verbrauch der aktiven Session — Balken, Prozent, Token-Stand und Modell, direkt aus dem Session-Transkript gelesen, ohne einen Claude-Lauf zu kosten. Das Kontextfenster wird nicht geraten: Jeder Auftrag merkt sich den <code>contextWindow</code>-Wert aus dem Result-JSON. Ab 70 % Füllstand weist die Antwort auf <code>/clear</code> hin. Weiterhin gilt: <strong>Unter root funktioniert der Modus <code>voll</code> nicht</strong> — Claude Code verweigert <code>bypassPermissions</code> mit root-Rechten grundsätzlich. Wer <code>voll</code> will, betreibt den Bot als eigenen unprivilegierten Benutzer.</p>
 <h2 id="1-was-ist-das">1. Was ist das?</h2>
 <p>Ein selbstgebauter Telegram-Bot (ein Node-Script, null Fremdpakete), mit dem du Claude-Code-Sessions auf einem Linux-Server vom Handy aus steuerst:</p>
 <ul>
@@ -210,15 +210,16 @@ rl.on("line", async (line) =&gt; {
 <h3 id="3-7-den-bot-anlegen-root-bin-telegram-session-mjs">3.7 Den Bot anlegen: <code>/root/bin/telegram-session.mjs</code></h3>
 <p>Die Konstante <code>HOST</code> unten auf deinen Servernamen setzen (wird nur für den SSH-Hinweis in <code>/status</code> gebraucht).</p>
 <pre data-lang="javascript"><code>#!/usr/bin/env node
-// Session-Bot v6.1: steuert Claude-Code-Sessions auf dem VPS per Telegram.
+// Session-Bot v7: steuert Claude-Code-Sessions auf dem VPS per Telegram.
 // Jede normale Nachricht ist ein Auftrag an die aktive Session.
 // v2: Projektverzeichnis waehlbar. v3: /clear, Web-Zugriff, Freigabe-Buttons. v4: /modus je Session.
 // v5: Button-Klick editiert die Anfrage-Nachricht (ERLAUBT/ABGELEHNT sichtbar), realistische Antwortzeit-Ansagen.
 // v6: /modell-Befehl - Sprachmodell je Session waehlbar (opus, sonnet, haiku, standard).
 // v6.1: stdin sofort geschlossen (spart 3s Wartezeit je Auftrag), Fehlertexte zeigen das Ende der Meldung statt des Kommando-Echos.
+// v7: /usage-Befehl - Kontext-Verbrauch der aktiven Session aus dem Transkript, Kontextfenster je Lauf aus modelUsage gemerkt.
 // Hinweis: Der Modus "voll" (bypassPermissions) funktioniert nicht, wenn der Bot als root laeuft - Claude Code verweigert das grundsaetzlich.
-// Befehle: /neu [projekt|/pfad] [Auftrag], /projekte [add name /pfad], /modus [name], /modell [name], /sessions, /wechsel N, /status, /clear, /ende
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+// Befehle: /neu [projekt|/pfad] [Auftrag], /projekte [add name /pfad], /modus [name], /modell [name], /sessions, /wechsel N, /status, /usage, /clear, /ende
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { execFile } from "node:child_process";
 
 const TOKEN = process.env.BOT_TOKEN;
@@ -229,6 +230,8 @@ const PROJ = "/root/.config/claude-projekte.json";
 const PERM_DIR = "/root/.perm";
 const DEFAULT_CWD = "/root/vault";
 const DEFAULT_MODE = "acceptEdits";
+const PROJECTS = "/root/.claude/projects";
+const FENSTER_FALLBACK = 200000; // solange kein Lauf das echte Kontextfenster gemeldet hat
 const CLAUDE = "/root/.local/bin/claude";
 const HOST = "&lt;DEIN-SERVER&gt;";
 const ENV = { ...process.env, HOME: "/root", MCP_TOOL_TIMEOUT: "360000", PATH: "/root/.local/bin:" + (process.env.PATH || "/usr/bin:/bin") };
@@ -251,6 +254,33 @@ const kurz = (cwd) =&gt; {
   return hit ? hit[0] : c.split("/").filter(Boolean).pop();
 };
 const wann = (t) =&gt; new Date(t).toLocaleString("de-DE", { timeZone: "Europe/Berlin", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+const tsd = (n) =&gt; n.toLocaleString("de-DE");
+
+// Kontext-Verbrauch aus dem Session-Transkript: letzte assistant-Zeile (ohne Subagenten) zaehlt.
+// input + cache_read + cache_creation = Kontextgroesse beim letzten API-Call. Kostenlos, kein Claude-Lauf.
+function kontextStand(sessionId) {
+  let pfad = null;
+  try {
+    for (const dir of readdirSync(PROJECTS)) {
+      const p = `${PROJECTS}/${dir}/${sessionId}.jsonl`;
+      if (existsSync(p)) { pfad = p; break; }
+    }
+  } catch {}
+  if (!pfad) return null;
+  let zeilen;
+  try { zeilen = readFileSync(pfad, "utf8").split("\n"); } catch { return null; }
+  for (let i = zeilen.length - 1; i &gt;= 0; i--) {
+    if (!zeilen[i].includes('"assistant"')) continue;
+    try {
+      const j = JSON.parse(zeilen[i]);
+      if (j.type !== "assistant" || j.isSidechain || !j.message?.usage) continue;
+      const u = j.message.usage;
+      const kontext = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+      if (kontext &gt; 0) return { kontext, modell: j.message.model || null };
+    } catch {}
+  }
+  return null;
+}
 const DAUER = "Antwort kommt meist unter einer Minute, groessere Auftraege brauchen laenger.";
 
 async function send(text) {
@@ -275,7 +305,13 @@ function runClaude(auftrag, resumeId, cwd, modus, modell) {
       if (e &amp;&amp; !out) return resolve({ ok: false, error: String((e &amp;&amp; e.message) || e).slice(-400) });
       try {
         const j = JSON.parse(out);
-        resolve({ ok: true, result: j.result || "(kein Ergebnis)", sid: j.session_id || resumeId || null });
+        // Kontextfenster des Hauptmodells merken (Eintrag mit den meisten Input-Tokens in modelUsage)
+        let fenster = null, meiste = -1;
+        for (const mu of Object.values(j.modelUsage || {})) {
+          const inp = (mu.inputTokens || 0) + (mu.cacheReadInputTokens || 0) + (mu.cacheCreationInputTokens || 0);
+          if (mu.contextWindow &amp;&amp; inp &gt; meiste) { meiste = inp; fenster = mu.contextWindow; }
+        }
+        resolve({ ok: true, result: j.result || "(kein Ergebnis)", sid: j.session_id || resumeId || null, fenster });
       } catch {
         resolve({ ok: false, error: "Antwort nicht lesbar: " + String(out).slice(0, 300) });
       }
@@ -302,10 +338,10 @@ async function pump() {
     if (cur) {
       // resume liefert eine neue Session-ID: uebernehmen, sonst setzt der naechste Auftrag am alten Punkt an
       const s = reg2.sessions.find((x) =&gt; x.id === cur.id);
-      if (s) { s.id = r.sid || s.id; s.zuletzt = Date.now(); }
+      if (s) { s.id = r.sid || s.id; s.zuletzt = Date.now(); if (r.fenster) s.fenster = r.fenster; }
       if (reg2.aktiv === cur.id) reg2.aktiv = r.sid || cur.id;
     } else if (r.sid &amp;&amp; !reg2.sessions.some((x) =&gt; x.id === r.sid)) {
-      reg2.sessions.push({ id: r.sid, titel: item.text.slice(0, 48), cwd, modus, modell, erstellt: Date.now(), zuletzt: Date.now() });
+      reg2.sessions.push({ id: r.sid, titel: item.text.slice(0, 48), cwd, modus, modell, fenster: r.fenster || null, erstellt: Date.now(), zuletzt: Date.now() });
       if (reg2.sessions.length &gt; 15) reg2.sessions = reg2.sessions.slice(-15);
       if (!reg2.aktiv) reg2.aktiv = r.sid;
       reg2.naechstesCwd = null;
@@ -319,7 +355,7 @@ async function pump() {
 }
 
 let offset = 0;
-console.log(new Date().toISOString(), "Session-Bot v6.1 gestartet");
+console.log(new Date().toISOString(), "Session-Bot v7 gestartet");
 while (true) {
   try {
     const res = await fetch(`${API}/getUpdates?timeout=50&amp;offset=${offset}`);
@@ -361,7 +397,7 @@ while (true) {
       const cur = reg.sessions.find((s) =&gt; s.id === reg.aktiv) || null;
 
       if (text === "/start") {
-        await send("Session-Bot bereit. Jede Nachricht ist ein Auftrag an die aktive Claude-Session. Befehle:\n/neu [projekt] [Auftrag] - neue Session, Verzeichnis waehlbar\n/projekte - Verzeichnisse zeigen, mit add registrieren\n/modus [standard|edits|plan|voll] - Berechtigungsmodus je Session\n/modell [opus|sonnet|haiku|standard] - Sprachmodell je Session\n/sessions - alle Sessions\n/wechsel N - Session wechseln\n/status - Stand plus SSH-Befehl zum Fortsetzen am Rechner\n/clear - Kontext leeren, frisch im selben Verzeichnis\n/ende - aktive Session ablegen\nWeb-Suche ist erlaubt. Braucht Claude weitere Rechte, kommt eine Freigabe-Anfrage mit Buttons (5 Minuten Zeit, dein Klick wird direkt in der Nachricht bestaetigt). " + DAUER);
+        await send("Session-Bot bereit. Jede Nachricht ist ein Auftrag an die aktive Claude-Session. Befehle:\n/neu [projekt] [Auftrag] - neue Session, Verzeichnis waehlbar\n/projekte - Verzeichnisse zeigen, mit add registrieren\n/modus [standard|edits|plan|voll] - Berechtigungsmodus je Session\n/modell [opus|sonnet|haiku|standard] - Sprachmodell je Session\n/sessions - alle Sessions\n/wechsel N - Session wechseln\n/status - Stand plus SSH-Befehl zum Fortsetzen am Rechner\n/usage - Kontext-Verbrauch der aktiven Session\n/clear - Kontext leeren, frisch im selben Verzeichnis\n/ende - aktive Session ablegen\nWeb-Suche ist erlaubt. Braucht Claude weitere Rechte, kommt eine Freigabe-Anfrage mit Buttons (5 Minuten Zeit, dein Klick wird direkt in der Nachricht bestaetigt). " + DAUER);
         continue;
       }
       if (text === "/modus" || text.startsWith("/modus ")) {
@@ -439,6 +475,16 @@ while (true) {
         }
         continue;
       }
+      if (text === "/usage") {
+        if (!cur) { await send("Keine aktive Session. Schick einen Auftrag oder /neu."); continue; }
+        const k = kontextStand(cur.id);
+        if (!k) { await send(`Kein Transkript zur Session "${cur.titel}" gefunden - vermutlich lief noch kein Auftrag durch.`); continue; }
+        const fenster = cur.fenster || FENSTER_FALLBACK;
+        const prozent = Math.min(100, Math.round((k.kontext / fenster) * 100));
+        const balken = "#".repeat(Math.round(prozent / 10)).padEnd(10, "-");
+        await send(`Kontext der Session "${cur.titel}":\n[${balken}] ${prozent} %\n${tsd(k.kontext)} von ${tsd(fenster)} Token${cur.fenster ? "" : " (Fenster geschaetzt, nach dem naechsten Auftrag exakt)"}\nModell: ${k.modell || modellName(cur.modell)}${prozent &gt;= 70 ? "\n\nWird es eng: /clear leert den Kontext, das Verzeichnis bleibt." : ""}`);
+        continue;
+      }
       if (text === "/clear") {
         if (!cur) { await send("Keine aktive Session. /neu startet frisch."); continue; }
         reg.sessions = reg.sessions.filter((s) =&gt; s.id !== cur.id);
@@ -499,10 +545,11 @@ journalctl -u telegram-session -f         # Log live</code></pre>
 <li>„Wie ist das Wetter in Hamburg?" → erste Session entsteht, Antwort mit Websuche</li>
 <li>„Führe uptime aus" → läuft ohne Nachfrage (read-only)</li>
 <li>„Lege /root/test per touch an" → Freigabe-Button erscheint, nach „Erlauben" wird ausgeführt und die Nachricht zeigt ERLAUBT</li>
+<li><code>/usage</code> → Kontext-Balken der aktiven Session mit Prozent und Token-Stand</li>
 </ol>
 <h2 id="4-referenz-befehle-modi-parameter">4. Referenz: Befehle, Modi, Parameter</h2>
 <h3 id="telegram-befehle">Telegram-Befehle</h3>
-<table><tr><th>Befehl</th><th>Wirkung</th></tr><tr><td>*(normale Nachricht)*</td><td>Auftrag an die aktive Session; ohne aktive Session wird automatisch eine neue eröffnet</td></tr><tr><td>`/neu [projekt\</td><td>/pfad] [Auftrag]`</td><td>Neue Session, optional in registriertem Projekt oder absolutem Pfad, optional direkt mit Auftrag</td></tr><tr><td><code>/projekte</code></td><td>Registrierte Verzeichnisse anzeigen</td></tr><tr><td><code>/projekte add name /pfad</code></td><td>Verzeichnis unter Kurznamen registrieren</td></tr><tr><td><code>/modus [name]</code></td><td>Berechtigungsmodus anzeigen bzw. für aktive/nächste Session setzen</td></tr><tr><td><code>/modell [name]</code></td><td>Sprachmodell anzeigen bzw. setzen (opus, sonnet, haiku, standard); greift ab dem nächsten Auftrag</td></tr><tr><td><code>/sessions</code></td><td>Alle Sessions mit Verzeichnis, Modus, Modell, letzter Nutzung</td></tr><tr><td><code>/wechsel N</code></td><td>Aktive Session wechseln (Nummer aus /sessions)</td></tr><tr><td><code>/status</code></td><td>Aktive Session, Verzeichnis, Modus, Auslastung, fertiger SSH-Befehl zum Fortsetzen am Rechner</td></tr><tr><td><code>/clear</code></td><td>Kontext leeren: Session ablegen, nächste Nachricht startet frisch im selben Verzeichnis</td></tr><tr><td><code>/ende</code></td><td>Aktive Session ablegen (Transkript bleibt unter <code>~/.claude/projects/</code> erhalten)</td></tr></table>
+<table><tr><th>Befehl</th><th>Wirkung</th></tr><tr><td>*(normale Nachricht)*</td><td>Auftrag an die aktive Session; ohne aktive Session wird automatisch eine neue eröffnet</td></tr><tr><td>`/neu [projekt\</td><td>/pfad] [Auftrag]`</td><td>Neue Session, optional in registriertem Projekt oder absolutem Pfad, optional direkt mit Auftrag</td></tr><tr><td><code>/projekte</code></td><td>Registrierte Verzeichnisse anzeigen</td></tr><tr><td><code>/projekte add name /pfad</code></td><td>Verzeichnis unter Kurznamen registrieren</td></tr><tr><td><code>/modus [name]</code></td><td>Berechtigungsmodus anzeigen bzw. für aktive/nächste Session setzen</td></tr><tr><td><code>/modell [name]</code></td><td>Sprachmodell anzeigen bzw. setzen (opus, sonnet, haiku, standard); greift ab dem nächsten Auftrag</td></tr><tr><td><code>/sessions</code></td><td>Alle Sessions mit Verzeichnis, Modus, Modell, letzter Nutzung</td></tr><tr><td><code>/wechsel N</code></td><td>Aktive Session wechseln (Nummer aus /sessions)</td></tr><tr><td><code>/status</code></td><td>Aktive Session, Verzeichnis, Modus, Auslastung, fertiger SSH-Befehl zum Fortsetzen am Rechner</td></tr><tr><td><code>/usage</code></td><td>Kontext-Verbrauch der aktiven Session: Balken, Prozent, Token-Stand und Modell — aus dem Transkript, kostenlos ohne Claude-Lauf</td></tr><tr><td><code>/clear</code></td><td>Kontext leeren: Session ablegen, nächste Nachricht startet frisch im selben Verzeichnis</td></tr><tr><td><code>/ende</code></td><td>Aktive Session ablegen (Transkript bleibt unter <code>~/.claude/projects/</code> erhalten)</td></tr></table>
 <h3 id="berechtigungsmodi-modus">Berechtigungsmodi (<code>/modus</code>)</h3>
 <table><tr><th>Name</th><th>claude-Wert</th><th>Verhalten</th></tr><tr><td><code>standard</code></td><td><code>default</code></td><td>Alles außer Lesen fragt per Button an, auch Dateiänderungen</td></tr><tr><td><code>edits</code></td><td><code>acceptEdits</code></td><td>Dateiänderungen automatisch, Shell &amp; Co. per Button — Standard</td></tr><tr><td><code>plan</code></td><td><code>plan</code></td><td>Nur lesen und planen, ändert nichts</td></tr><tr><td><code>voll</code></td><td><code>bypassPermissions</code></td><td>Keine Nachfragen; <strong>funktioniert nicht, wenn der Bot als root läuft</strong> — Claude Code verweigert das grundsätzlich (bestätigt 04.09.2026). Braucht einen unprivilegierten Benutzer</td></tr></table>
 <h3 id="sprachmodelle-modell">Sprachmodelle (<code>/modell</code>)</h3>
@@ -525,7 +572,7 @@ journalctl -u telegram-session -f         # Log live</code></pre>
 <li>Antwortzeit einfacher Aufträge: gemessen 13–38 Sekunden (vor v6.1; das sofort geschlossene stdin spart seither weitere ~3 Sekunden); lange Antworten werden auf mehrere Telegram-Nachrichten gesplittet (Limit 4096 Zeichen)</li>
 <li>Je Zeitpunkt läuft genau ein Auftrag; weitere Nachrichten werden eingereiht und danach abgearbeitet</li>
 </ul>
-<footer>Stand 04.09.2026 · Bot v6.1 · Alle persönlichen Werte sind Platzhalter: &lt;BOT_TOKEN&gt;, &lt;CHAT_ID&gt;, &lt;DEIN-SERVER&gt;</footer>
+<footer>Stand 05.09.2026 · Bot v7 · Alle persönlichen Werte sind Platzhalter: &lt;BOT_TOKEN&gt;, &lt;CHAT_ID&gt;, &lt;DEIN-SERVER&gt;</footer>
 </div>
 </body>
 </html>

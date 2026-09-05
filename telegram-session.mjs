@@ -1,13 +1,14 @@
 #!/usr/bin/env node
-// Session-Bot v6.1: steuert Claude-Code-Sessions auf dem VPS per Telegram.
+// Session-Bot v7: steuert Claude-Code-Sessions auf dem VPS per Telegram.
 // Jede normale Nachricht ist ein Auftrag an die aktive Session.
 // v2: Projektverzeichnis waehlbar. v3: /clear, Web-Zugriff, Freigabe-Buttons. v4: /modus je Session.
 // v5: Button-Klick editiert die Anfrage-Nachricht (ERLAUBT/ABGELEHNT sichtbar), realistische Antwortzeit-Ansagen.
 // v6: /modell-Befehl - Sprachmodell je Session waehlbar (opus, sonnet, haiku, standard).
 // v6.1: stdin sofort geschlossen (spart 3s Wartezeit je Auftrag), Fehlertexte zeigen das Ende der Meldung statt des Kommando-Echos.
+// v7: /usage-Befehl - Kontext-Verbrauch der aktiven Session aus dem Transkript, Kontextfenster je Lauf aus modelUsage gemerkt.
 // Hinweis: Der Modus "voll" (bypassPermissions) funktioniert nicht, wenn der Bot als root laeuft - Claude Code verweigert das grundsaetzlich.
-// Befehle: /neu [projekt|/pfad] [Auftrag], /projekte [add name /pfad], /modus [name], /modell [name], /sessions, /wechsel N, /status, /clear, /ende
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+// Befehle: /neu [projekt|/pfad] [Auftrag], /projekte [add name /pfad], /modus [name], /modell [name], /sessions, /wechsel N, /status, /usage, /clear, /ende
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { execFile } from "node:child_process";
 
 const TOKEN = process.env.BOT_TOKEN;
@@ -18,6 +19,8 @@ const PROJ = "/root/.config/claude-projekte.json";
 const PERM_DIR = "/root/.perm";
 const DEFAULT_CWD = "/root/vault";
 const DEFAULT_MODE = "acceptEdits";
+const PROJECTS = "/root/.claude/projects";
+const FENSTER_FALLBACK = 200000; // solange kein Lauf das echte Kontextfenster gemeldet hat
 const CLAUDE = "/root/.local/bin/claude";
 const HOST = "<DEIN-SERVER>";
 const ENV = { ...process.env, HOME: "/root", MCP_TOOL_TIMEOUT: "360000", PATH: "/root/.local/bin:" + (process.env.PATH || "/usr/bin:/bin") };
@@ -40,6 +43,33 @@ const kurz = (cwd) => {
   return hit ? hit[0] : c.split("/").filter(Boolean).pop();
 };
 const wann = (t) => new Date(t).toLocaleString("de-DE", { timeZone: "Europe/Berlin", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+const tsd = (n) => n.toLocaleString("de-DE");
+
+// Kontext-Verbrauch aus dem Session-Transkript: letzte assistant-Zeile (ohne Subagenten) zaehlt.
+// input + cache_read + cache_creation = Kontextgroesse beim letzten API-Call. Kostenlos, kein Claude-Lauf.
+function kontextStand(sessionId) {
+  let pfad = null;
+  try {
+    for (const dir of readdirSync(PROJECTS)) {
+      const p = `${PROJECTS}/${dir}/${sessionId}.jsonl`;
+      if (existsSync(p)) { pfad = p; break; }
+    }
+  } catch {}
+  if (!pfad) return null;
+  let zeilen;
+  try { zeilen = readFileSync(pfad, "utf8").split("\n"); } catch { return null; }
+  for (let i = zeilen.length - 1; i >= 0; i--) {
+    if (!zeilen[i].includes('"assistant"')) continue;
+    try {
+      const j = JSON.parse(zeilen[i]);
+      if (j.type !== "assistant" || j.isSidechain || !j.message?.usage) continue;
+      const u = j.message.usage;
+      const kontext = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+      if (kontext > 0) return { kontext, modell: j.message.model || null };
+    } catch {}
+  }
+  return null;
+}
 const DAUER = "Antwort kommt meist unter einer Minute, groessere Auftraege brauchen laenger.";
 
 async function send(text) {
@@ -64,7 +94,13 @@ function runClaude(auftrag, resumeId, cwd, modus, modell) {
       if (e && !out) return resolve({ ok: false, error: String((e && e.message) || e).slice(-400) });
       try {
         const j = JSON.parse(out);
-        resolve({ ok: true, result: j.result || "(kein Ergebnis)", sid: j.session_id || resumeId || null });
+        // Kontextfenster des Hauptmodells merken (Eintrag mit den meisten Input-Tokens in modelUsage)
+        let fenster = null, meiste = -1;
+        for (const mu of Object.values(j.modelUsage || {})) {
+          const inp = (mu.inputTokens || 0) + (mu.cacheReadInputTokens || 0) + (mu.cacheCreationInputTokens || 0);
+          if (mu.contextWindow && inp > meiste) { meiste = inp; fenster = mu.contextWindow; }
+        }
+        resolve({ ok: true, result: j.result || "(kein Ergebnis)", sid: j.session_id || resumeId || null, fenster });
       } catch {
         resolve({ ok: false, error: "Antwort nicht lesbar: " + String(out).slice(0, 300) });
       }
@@ -91,10 +127,10 @@ async function pump() {
     if (cur) {
       // resume liefert eine neue Session-ID: uebernehmen, sonst setzt der naechste Auftrag am alten Punkt an
       const s = reg2.sessions.find((x) => x.id === cur.id);
-      if (s) { s.id = r.sid || s.id; s.zuletzt = Date.now(); }
+      if (s) { s.id = r.sid || s.id; s.zuletzt = Date.now(); if (r.fenster) s.fenster = r.fenster; }
       if (reg2.aktiv === cur.id) reg2.aktiv = r.sid || cur.id;
     } else if (r.sid && !reg2.sessions.some((x) => x.id === r.sid)) {
-      reg2.sessions.push({ id: r.sid, titel: item.text.slice(0, 48), cwd, modus, modell, erstellt: Date.now(), zuletzt: Date.now() });
+      reg2.sessions.push({ id: r.sid, titel: item.text.slice(0, 48), cwd, modus, modell, fenster: r.fenster || null, erstellt: Date.now(), zuletzt: Date.now() });
       if (reg2.sessions.length > 15) reg2.sessions = reg2.sessions.slice(-15);
       if (!reg2.aktiv) reg2.aktiv = r.sid;
       reg2.naechstesCwd = null;
@@ -108,7 +144,7 @@ async function pump() {
 }
 
 let offset = 0;
-console.log(new Date().toISOString(), "Session-Bot v6.1 gestartet");
+console.log(new Date().toISOString(), "Session-Bot v7 gestartet");
 while (true) {
   try {
     const res = await fetch(`${API}/getUpdates?timeout=50&offset=${offset}`);
@@ -150,7 +186,7 @@ while (true) {
       const cur = reg.sessions.find((s) => s.id === reg.aktiv) || null;
 
       if (text === "/start") {
-        await send("Session-Bot bereit. Jede Nachricht ist ein Auftrag an die aktive Claude-Session. Befehle:\n/neu [projekt] [Auftrag] - neue Session, Verzeichnis waehlbar\n/projekte - Verzeichnisse zeigen, mit add registrieren\n/modus [standard|edits|plan|voll] - Berechtigungsmodus je Session\n/modell [opus|sonnet|haiku|standard] - Sprachmodell je Session\n/sessions - alle Sessions\n/wechsel N - Session wechseln\n/status - Stand plus SSH-Befehl zum Fortsetzen am Rechner\n/clear - Kontext leeren, frisch im selben Verzeichnis\n/ende - aktive Session ablegen\nWeb-Suche ist erlaubt. Braucht Claude weitere Rechte, kommt eine Freigabe-Anfrage mit Buttons (5 Minuten Zeit, dein Klick wird direkt in der Nachricht bestaetigt). " + DAUER);
+        await send("Session-Bot bereit. Jede Nachricht ist ein Auftrag an die aktive Claude-Session. Befehle:\n/neu [projekt] [Auftrag] - neue Session, Verzeichnis waehlbar\n/projekte - Verzeichnisse zeigen, mit add registrieren\n/modus [standard|edits|plan|voll] - Berechtigungsmodus je Session\n/modell [opus|sonnet|haiku|standard] - Sprachmodell je Session\n/sessions - alle Sessions\n/wechsel N - Session wechseln\n/status - Stand plus SSH-Befehl zum Fortsetzen am Rechner\n/usage - Kontext-Verbrauch der aktiven Session\n/clear - Kontext leeren, frisch im selben Verzeichnis\n/ende - aktive Session ablegen\nWeb-Suche ist erlaubt. Braucht Claude weitere Rechte, kommt eine Freigabe-Anfrage mit Buttons (5 Minuten Zeit, dein Klick wird direkt in der Nachricht bestaetigt). " + DAUER);
         continue;
       }
       if (text === "/modus" || text.startsWith("/modus ")) {
@@ -226,6 +262,16 @@ while (true) {
         } else {
           await send(`Keine aktive Session. ${lage}`);
         }
+        continue;
+      }
+      if (text === "/usage") {
+        if (!cur) { await send("Keine aktive Session. Schick einen Auftrag oder /neu."); continue; }
+        const k = kontextStand(cur.id);
+        if (!k) { await send(`Kein Transkript zur Session "${cur.titel}" gefunden - vermutlich lief noch kein Auftrag durch.`); continue; }
+        const fenster = cur.fenster || FENSTER_FALLBACK;
+        const prozent = Math.min(100, Math.round((k.kontext / fenster) * 100));
+        const balken = "#".repeat(Math.round(prozent / 10)).padEnd(10, "-");
+        await send(`Kontext der Session "${cur.titel}":\n[${balken}] ${prozent} %\n${tsd(k.kontext)} von ${tsd(fenster)} Token${cur.fenster ? "" : " (Fenster geschaetzt, nach dem naechsten Auftrag exakt)"}\nModell: ${k.modell || modellName(cur.modell)}${prozent >= 70 ? "\n\nWird es eng: /clear leert den Kontext, das Verzeichnis bleibt." : ""}`);
         continue;
       }
       if (text === "/clear") {

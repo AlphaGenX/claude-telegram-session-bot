@@ -13,6 +13,7 @@ Ein Telegram-Bot, der Claude-Code-Sessions auf einem Linux-Server steuert — Se
 - Sprachmodell je Session: `/modell opus|sonnet|haiku|standard` — Bauaufträge auf Opus, schnelle Handgriffe auf Haiku
 - Braucht Claude eine Berechtigung (z. B. Shell), kommt eine Telegram-Anfrage mit **Erlauben/Ablehnen-Buttons**; die Nachricht zeigt danach sichtbar ERLAUBT / ABGELEHNT / ABGELAUFEN
 - `/status` liefert den fertigen SSH-Befehl, um jede Session am Rechner als volle interaktive Claude-Code-Sitzung fortzusetzen
+- `/usage` zeigt den Kontext-Verbrauch der aktiven Session — direkt aus dem Transkript, kostenlos ohne Claude-Lauf
 - Web-Suche (`WebSearch`/`WebFetch`) ist fest erlaubt
 - Nur die eigene Telegram-Chat-ID wird akzeptiert; Long Polling, keine offenen Ports
 
@@ -81,6 +82,7 @@ sudo bash install.sh          # fragt Token, Chat-ID, Hostname, Arbeitsverzeichn
 | `/sessions` | Alle Sessions mit Verzeichnis, Modus und Modell |
 | `/wechsel N` | Aktive Session wechseln |
 | `/status` | Stand + SSH-Befehl zum Fortsetzen am Rechner |
+| `/usage` | Kontext-Verbrauch der aktiven Session: Balken, Prozent, Token-Stand, Modell |
 | `/clear` | Kontext leeren, frisch im selben Verzeichnis |
 | `/ende` | Session ablegen (Transkript bleibt unter `~/.claude/projects/`) |
 
@@ -104,6 +106,7 @@ sudo bash install.sh          # fragt Token, Chat-ID, Hostname, Arbeitsverzeichn
 
 ## Versionen
 
+- **v7** (2026-09-05): `/usage`-Befehl — Kontext-Verbrauch der aktiven Session aus dem Session-Transkript (letzter API-Call, Subagenten ausgefiltert), Kontextfenster wird je Auftrag aus dem Result-JSON gemerkt statt hartcodiert; ab 70 % Hinweis auf `/clear`
 - **v6.1** (2026-09-04): stdin des Claude-Prozesses wird sofort geschlossen (spart 3 Sekunden Wartezeit je Auftrag); Fehlermeldungen zeigen das Ende der Meldung statt des Kommando-Echos — da steht die Ursache
 - **v6** (2026-09-04): `/modell`-Befehl, Sprachmodell je Session
 - **v5** (2026-09-03): Erstveröffentlichung — Session-Verwaltung, Projektverzeichnisse, Freigabe-Buttons mit sichtbarem Feedback, `/modus`

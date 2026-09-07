@@ -1,21 +1,20 @@
 #!/usr/bin/env node
-// Permission-MCP v2: leitet Claudes Berechtigungsanfragen weiter an den Nutzer.
+// Permission-MCP v3 (tokenlos): leitet Claudes Berechtigungsanfragen weiter an den Nutzer.
 // Wird von claude -p ueber --permission-prompt-tool mcp__perm__approve aufgerufen.
-// Antwortdateien schreibt der Session-Bot bei Button-Tipp nach /root/.perm/<id>.
-// v2: Bei Ablauf (5 Minuten) editiert der MCP die Anfrage-Nachricht und entfernt die Buttons.
-import { readFileSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
+//
+// UNTERSCHIED ZU v2: Dieser Prozess kennt den Bot-Token NICHT mehr. v2 rief die Telegram-API
+// selbst auf und holte sich den Token notfalls aus der env-Datei - in einem Prozess, den Claude
+// als Subprozess startet. Ein per Prompt Injection gekaperter Lauf haette ihn dort lesen und
+// Vault-Inhalte an eine fremde chat_id senden koennen. Deshalb jetzt ueber Dateien:
+//   MCP schreibt  PERM_DIR/<id>.req   (Anfrage als JSON, kennt keinen Token)
+//   Bot liest .req -> sendet per Telegram -> schreibt PERM_DIR/<id>  (ja|nein)
+//   MCP liest     PERM_DIR/<id>       und raeumt beide Dateien weg
+// Der Token bleibt damit ausschliesslich im Bot-Prozess (telegram-session.mjs).
+import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
 import { createInterface } from "node:readline";
 
-let TOKEN = process.env.BOT_TOKEN, CHAT = process.env.CHAT_ID;
-if (!TOKEN || !CHAT) {
-  try {
-    const env = readFileSync("/root/.config/telegram-session.env", "utf8");
-    TOKEN = TOKEN || (env.match(/^BOT_TOKEN=(.+)$/m) || [])[1];
-    CHAT = CHAT || (env.match(/^CHAT_ID=(.+)$/m) || [])[1];
-  } catch {}
-}
-const API = `https://api.telegram.org/bot${TOKEN}`;
-const DIR = "/root/.perm";
+const DIR = process.env.PERM_DIR || "/root/.perm";
+const TIMEOUT_MS = Number(process.env.PERM_TIMEOUT_MS || 300000); // 5 Minuten
 const out = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
 
 const kurzInput = (inp) => {
@@ -27,33 +26,34 @@ const kurzInput = (inp) => {
 };
 
 async function frage(toolName, input) {
-  mkdirSync(DIR, { recursive: true });
+  mkdirSync(DIR, { recursive: true, mode: 0o700 });
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-  const file = `${DIR}/${id}`;
-  const anfrage = `Claude bittet um Erlaubnis:\n${toolName}\n${kurzInput(input)}`;
-  const resp = await fetch(`${API}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: Number(CHAT), text: anfrage,
-      reply_markup: { inline_keyboard: [[
-        { text: "Erlauben", callback_data: `perm:${id}:ja` },
-        { text: "Ablehnen", callback_data: `perm:${id}:nein` }
-      ]] } }) });
-  let mid = null;
-  try { mid = (await resp.json())?.result?.message_id ?? null; } catch {}
-  const ende = Date.now() + 300000; // 5 Minuten
+  const reqFile = `${DIR}/${id}.req`;
+  const antFile = `${DIR}/${id}`;
+
+  // Anfrage ablegen - der Bot-Prozess pollt dieses Verzeichnis und verschickt sie
+  writeFileSync(reqFile, JSON.stringify({
+    id,
+    tool: String(toolName || "unbekannt"),
+    detail: kurzInput(input),
+    ts: Date.now(),
+    timeout_ms: TIMEOUT_MS,
+  }), { mode: 0o600 });
+
+  const ende = Date.now() + TIMEOUT_MS;
   while (Date.now() < ende) {
-    await new Promise((r) => setTimeout(r, 2000));
-    if (existsSync(file)) {
-      const antwort = readFileSync(file, "utf8").trim();
-      try { unlinkSync(file); } catch {}
+    await new Promise((r) => setTimeout(r, 1000));
+    if (existsSync(antFile)) {
+      let antwort = "";
+      try { antwort = readFileSync(antFile, "utf8").trim(); } catch {}
+      try { unlinkSync(antFile); } catch {}
+      try { if (existsSync(reqFile)) unlinkSync(reqFile); } catch {}
       return antwort === "ja";
     }
   }
-  // Abgelaufen: Nachricht kennzeichnen und Buttons entfernen, spaete Klicks laufen so nie ins Leere
-  if (mid) {
-    await fetch(`${API}/editMessageText`, { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: Number(CHAT), message_id: mid,
-        text: ("ABGELAUFEN - keine Antwort in 5 Minuten, automatisch abgelehnt.\n\n" + anfrage).slice(0, 4000) }) }).catch(() => {});
-  }
+  // Abgelaufen: markieren, damit der Bot die Anfrage-Nachricht kennzeichnen und die Buttons
+  // entfernen kann - spaete Klicks laufen so nie ins Leere.
+  try { if (existsSync(reqFile)) writeFileSync(reqFile + ".expired", "1", { mode: 0o600 }); } catch {}
   return false;
 }
 
@@ -62,7 +62,7 @@ rl.on("line", async (line) => {
   let m; try { m = JSON.parse(line); } catch { return; }
   try {
     if (m.method === "initialize") {
-      out({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: (m.params && m.params.protocolVersion) || "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "perm", version: "2.0.0" } } });
+      out({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: (m.params && m.params.protocolVersion) || "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "perm", version: "3.0.0" } } });
     } else if (m.method === "tools/list") {
       out({ jsonrpc: "2.0", id: m.id, result: { tools: [{ name: "approve", description: "Fragt per Telegram um Erlaubnis fuer eine Tool-Nutzung", inputSchema: { type: "object", properties: { tool_name: { type: "string" }, input: { type: "object" } }, required: ["tool_name", "input"] } }] } });
     } else if (m.method === "tools/call" && m.params && m.params.name === "approve") {

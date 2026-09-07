@@ -1,14 +1,16 @@
 #!/usr/bin/env node
-// Session-Bot v7: steuert Claude-Code-Sessions auf dem VPS per Telegram.
+// Session-Bot v8: steuert Claude-Code-Sessions auf dem VPS per Telegram.
 // Jede normale Nachricht ist ein Auftrag an die aktive Session.
 // v2: Projektverzeichnis waehlbar. v3: /clear, Web-Zugriff, Freigabe-Buttons. v4: /modus je Session.
 // v5: Button-Klick editiert die Anfrage-Nachricht (ERLAUBT/ABGELEHNT sichtbar), realistische Antwortzeit-Ansagen.
 // v6: /modell-Befehl - Sprachmodell je Session waehlbar (opus, sonnet, haiku, standard).
 // v6.1: stdin sofort geschlossen (spart 3s Wartezeit je Auftrag), Fehlertexte zeigen das Ende der Meldung statt des Kommando-Echos.
 // v7: /usage-Befehl - Kontext-Verbrauch der aktiven Session aus dem Transkript, Kontextfenster je Lauf aus modelUsage gemerkt.
+// v8: is_error wird geprueft (API-Fehler kamen als Exit 0 durch), Bot-Token nicht mehr an den
+//     Claude-Subprozess, Permission-MCP v3 tokenlos ueber Dateien, Modus standard=manual plus auto.
 // Hinweis: Der Modus "voll" (bypassPermissions) funktioniert nicht, wenn der Bot als root laeuft - Claude Code verweigert das grundsaetzlich.
 // Befehle: /neu [projekt|/pfad] [Auftrag], /projekte [add name /pfad], /modus [name], /modell [name], /sessions, /wechsel N, /status, /usage, /clear, /ende
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
 import { execFile } from "node:child_process";
 
 const TOKEN = process.env.BOT_TOKEN;
@@ -23,10 +25,18 @@ const PROJECTS = "/root/.claude/projects";
 const FENSTER_FALLBACK = 200000; // solange kein Lauf das echte Kontextfenster gemeldet hat
 const CLAUDE = "/root/.local/bin/claude";
 const HOST = "<DEIN-SERVER>";
-const ENV = { ...process.env, HOME: "/root", MCP_TOOL_TIMEOUT: "360000", PATH: "/root/.local/bin:" + (process.env.PATH || "/usr/bin:/bin") };
+// v8-Fix 3: BOT_TOKEN und CHAT_ID NICHT an den Claude-Subprozess weiterreichen. Sonst kann ein
+// per Prompt Injection gekaperter Lauf (siehe Sicherheitshinweis in der Projektnotiz) den Token
+// lesen und ueber api.telegram.org an eine beliebige chat_id senden - also Vault-Inhalte
+// exfiltrieren, ueber genau den Kanal, der offen sein muss, damit der Bot funktioniert.
+// Mit Firewall-Regeln nicht zu schliessen, deshalb hier.
+const { BOT_TOKEN: _t, CHAT_ID: _c, ...SAFE_ENV } = process.env;
+const ENV = { ...SAFE_ENV, HOME: "/root", PERM_DIR, MCP_TOOL_TIMEOUT: "360000", PATH: "/root/.local/bin:" + (SAFE_ENV.PATH || "/usr/bin:/bin") };
 
 // Telegram-Name -> claude --permission-mode
-const MODI = { standard: "default", edits: "acceptEdits", plan: "plan", voll: "bypassPermissions" };
+// v8-Fix 1: "default" ist als permission-mode nicht mehr gueltig, /modus standard brach damit ab.
+// Gueltig auf 2.1.260: acceptEdits, auto, bypassPermissions, manual, dontAsk, plan (claude --help).
+const MODI = { standard: "manual", edits: "acceptEdits", plan: "plan", auto: "auto", voll: "bypassPermissions" };
 const modusName = (wert) => (Object.entries(MODI).find(([, v]) => v === (wert || DEFAULT_MODE)) || ["edits"])[0];
 
 // Telegram-Name -> claude --model. null bedeutet: kein Flag, Claude Code entscheidet
@@ -81,6 +91,52 @@ async function send(text) {
   }
 }
 
+// v8-Fix 3: Gegenstueck zum tokenlosen Permission-MCP. Der MCP legt die Anfrage als
+// PERM_DIR/<id>.req ab, dieser Watcher verschickt sie und schreibt die Antwort als
+// PERM_DIR/<id> zurueck (siehe Button-Handler in der Hauptschleife weiter unten).
+const permMsg = new Map(); // id -> message_id der Anfrage-Nachricht
+async function permWatch() {
+  try {
+    mkdirSync(PERM_DIR, { recursive: true, mode: 0o700 });
+    for (const f of readdirSync(PERM_DIR)) {
+      if (f.endsWith(".req.expired")) {
+        const id = f.slice(0, -".req.expired".length);
+        const mid = permMsg.get(id);
+        if (mid) {
+          await fetch(`${API}/editMessageText`, { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ chat_id: CHAT_ID, message_id: mid,
+              text: "ABGELAUFEN - keine Antwort in 5 Minuten, automatisch abgelehnt." }) }).catch(() => {});
+        }
+        permMsg.delete(id);
+        try { unlinkSync(`${PERM_DIR}/${f}`); } catch {}
+        try { unlinkSync(`${PERM_DIR}/${id}.req`); } catch {}
+        continue;
+      }
+      if (!f.endsWith(".req")) continue;
+      const id = f.slice(0, -4);
+      if (permMsg.has(id)) continue;
+      let req; try { req = JSON.parse(readFileSync(`${PERM_DIR}/${f}`, "utf8")); } catch { continue; }
+      // Platzhalter VOR dem await setzen: dieser Watcher laeuft im Sekundentakt, und ein
+      // langsamer Telegram-Aufruf wuerde sonst zwei Durchlaeufe dieselbe Anfrage senden.
+      permMsg.set(id, null);
+      let mid = null;
+      try {
+        const resp = await fetch(`${API}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: CHAT_ID, text: `Claude bittet um Erlaubnis:\n${req.tool}\n${req.detail}`,
+            reply_markup: { inline_keyboard: [[
+              { text: "Erlauben", callback_data: `perm:${id}:ja` },
+              { text: "Ablehnen", callback_data: `perm:${id}:nein` }
+            ]] } }) });
+        mid = (await resp.json())?.result?.message_id ?? null;
+      } catch (e) { console.error(new Date().toISOString(), "PermWatch senden:", (e && e.message) || e); }
+      // Kam die Nachricht nicht durch, den Platzhalter wieder freigeben - sonst bleibt die
+      // Anfrage bis zum Ablauf unbeantwortet liegen, ohne dass sie je jemand gesehen hat.
+      if (mid === null) permMsg.delete(id); else permMsg.set(id, mid);
+    }
+  } catch (e) { console.error(new Date().toISOString(), "PermWatch:", (e && e.message) || e); }
+}
+setInterval(permWatch, 1000);
+
 function runClaude(auftrag, resumeId, cwd, modus, modell) {
   return new Promise((resolve) => {
     const args = ["-p", auftrag, "--output-format", "json", "--permission-mode", modus || DEFAULT_MODE,
@@ -94,6 +150,13 @@ function runClaude(auftrag, resumeId, cwd, modus, modell) {
       if (e && !out) return resolve({ ok: false, error: String((e && e.message) || e).slice(-400) });
       try {
         const j = JSON.parse(out);
+        // v8-Fix 2: claude -p meldet API-Fehler mit Exit 0 UND subtype "success" - der Fehlertext
+        // steht in result. Ohne diese Pruefung landet z.B. "OAuth session expired" als vermeintliche
+        // Claude-Antwort im Chat, und der Dienst wirkt dabei monatelang gesund. Nur is_error traegt.
+        if (j.is_error === true) {
+          const grund = j.result || j.api_error_status || j.terminal_reason || "unbekannter API-Fehler";
+          return resolve({ ok: false, error: `Claude meldet einen Fehler: ${String(grund).slice(0, 400)}`, sid: j.session_id || resumeId || null });
+        }
         // Kontextfenster des Hauptmodells merken (Eintrag mit den meisten Input-Tokens in modelUsage)
         let fenster = null, meiste = -1;
         for (const mu of Object.values(j.modelUsage || {})) {
@@ -144,7 +207,7 @@ async function pump() {
 }
 
 let offset = 0;
-console.log(new Date().toISOString(), "Session-Bot v7 gestartet");
+console.log(new Date().toISOString(), "Session-Bot v8 gestartet");
 while (true) {
   try {
     const res = await fetch(`${API}/getUpdates?timeout=50&offset=${offset}`);
@@ -160,9 +223,10 @@ while (true) {
           const id = teile[1] || "", antwort = teile[2] === "ja" ? "ja" : "nein";
           if (/^[a-z0-9]+$/i.test(id)) {
             try {
-              mkdirSync(PERM_DIR, { recursive: true });
-              writeFileSync(`${PERM_DIR}/${id}`, antwort);
+              mkdirSync(PERM_DIR, { recursive: true, mode: 0o700 });
+              writeFileSync(`${PERM_DIR}/${id}`, antwort, { mode: 0o600 });
               note = antwort === "ja" ? "Erlaubt" : "Abgelehnt";
+              permMsg.delete(id); // der MCP raeumt .req selbst weg, sobald er die Antwort liest
               // Sichtbares Feedback: Anfrage-Nachricht kennzeichnen, Buttons entfernen
               if (cq.message) {
                 const orig = cq.message.text || "Berechtigungsanfrage";
@@ -192,9 +256,9 @@ while (true) {
       if (text === "/modus" || text.startsWith("/modus ")) {
         const arg = text.slice(6).trim().toLowerCase();
         if (!arg) {
-          await send(`Aktueller Modus${cur ? ` der Session "${cur.titel}"` : " fuer die naechste Session"}: ${cur ? modusName(cur.modus) : modusName(reg.naechsterModus)}\n\nVerfuegbar:\nstandard - alles ausser Lesen fragt per Button an, auch Dateiaenderungen\nedits - Dateiaenderungen automatisch, Rest per Button (Standard)\nplan - nur lesen und planen, aendert nichts\nvoll - keine Nachfragen (Vorsicht; funktioniert nicht, wenn der Bot als root laeuft)`);
+          await send(`Aktueller Modus${cur ? ` der Session "${cur.titel}"` : " fuer die naechste Session"}: ${cur ? modusName(cur.modus) : modusName(reg.naechsterModus)}\n\nVerfuegbar:\nstandard - alles ausser Lesen fragt per Button an, auch Dateiaenderungen\nedits - Dateiaenderungen automatisch, Rest per Button (Standard)\nplan - nur lesen und planen, aendert nichts\nauto - Claude entscheidet selbst, wann es fragt\nvoll - keine Nachfragen (Vorsicht; funktioniert nicht, wenn der Bot als root laeuft)`);
         } else if (!MODI[arg]) {
-          await send("Unbekannter Modus. Verfuegbar: standard, edits, plan, voll");
+          await send("Unbekannter Modus. Verfuegbar: standard, edits, plan, auto, voll");
         } else {
           if (cur) {
             const s = reg.sessions.find((x) => x.id === cur.id);

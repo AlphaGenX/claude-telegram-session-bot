@@ -77,7 +77,7 @@ sudo bash install.sh          # fragt Token, Chat-ID, Hostname, Arbeitsverzeichn
 | *(Nachricht)* | Auftrag an die aktive Session; ohne aktive wird eine neue eröffnet |
 | `/neu [projekt\|/pfad] [Auftrag]` | Neue Session, Verzeichnis wählbar |
 | `/projekte` / `/projekte add name /pfad` | Verzeichnisse anzeigen / registrieren |
-| `/modus [standard\|edits\|plan\|voll]` | Berechtigungsmodus anzeigen bzw. setzen (`voll` braucht einen Nicht-root-Betrieb) |
+| `/modus [standard\|edits\|plan\|auto\|voll]` | Berechtigungsmodus anzeigen bzw. setzen (`voll` braucht einen Nicht-root-Betrieb) |
 | `/modell [opus\|sonnet\|haiku\|standard]` | Sprachmodell anzeigen bzw. setzen; gilt ab dem nächsten Auftrag |
 | `/sessions` | Alle Sessions mit Verzeichnis, Modus und Modell |
 | `/wechsel N` | Aktive Session wechseln |
@@ -94,7 +94,8 @@ sudo bash install.sh          # fragt Token, Chat-ID, Hostname, Arbeitsverzeichn
 | `telegram-session.mjs` | `DEFAULT_CWD`, `HOST` | Standard-Verzeichnis, Servername für `/status` |
 | `telegram-session.mjs` | `MCP_TOOL_TIMEOUT: "360000"` | Muss größer sein als die Button-Wartezeit |
 | `telegram-session.mjs` | `MODELLE` | Modell-IDs hinter `/modell` — bei neuen Claude-Versionen anpassen |
-| `permission-mcp.mjs` | `300000` in `frage()` | Wartezeit auf den Button (5 Min), danach abgelehnt |
+| `permission-mcp.mjs` | `PERM_TIMEOUT_MS` (Env, Standard `300000`) | Wartezeit auf den Button (5 Min), danach abgelehnt |
+| `telegram-session.mjs` | `PERM_DIR` | Austauschverzeichnis zwischen Bot und Permission-MCP (Standard `/root/.perm`) |
 | `claude-projekte.json` | Name → Pfad | Projekt-Kurznamen für `/neu` |
 
 ## Sicherheit
@@ -102,10 +103,12 @@ sudo bash install.sh          # fragt Token, Chat-ID, Hostname, Arbeitsverzeichn
 - Die **Chat-ID-Whitelist ist die einzige Schranke** — Token geheim halten, Bot-Namen nicht öffentlich teilen. Bei Verdacht: `/revoke` bei @BotFather, neuen Token in die env, Dienst neu starten
 - Keine offenen Ports nötig: Long Polling nutzt nur ausgehende HTTPS-Verbindungen
 - Wer dem Bot schreiben darf, gibt Claude Aufträge mit Schreibzugriff auf den Server — entsprechend behandeln
+- **Der Bot-Token wird dem Claude-Subprozess nicht vererbt** (seit v8). Sonst kann ein über Dateiinhalte gekaperter Lauf ihn auslesen und Daten über `api.telegram.org` an eine fremde `chat_id` senden — ein Weg, den keine Firewall schließt, weil Telegram erreichbar sein muss, damit der Bot überhaupt funktioniert
 - **Empfehlung:** Bot und Claude als eigenen unprivilegierten Benutzer betreiben statt als root — begrenzt den Schaden eines missbrauchten Zugangs und schaltet nebenbei den Modus `voll` frei
 
 ## Versionen
 
+- **v8** (2026-09-07): Drei Korrekturen aus einem Fork-Review. `is_error` des Result-JSON wird ausgewertet — `claude -p` meldet API-Fehler mit **Exit-Code 0 und `subtype: "success"`**, der Fehlertext landete dadurch als vermeintliche Claude-Antwort im Chat, während der Dienst gesund aussah. **Der Bot-Token wird nicht mehr an den Claude-Subprozess vererbt**; dazu Permission-MCP v3, der seine Anfragen tokenlos über Dateien stellt statt selbst die Telegram-API zu rufen. `standard` nutzt `manual` statt des nicht mehr gelisteten `default`, neuer Modus `auto`
 - **v7** (2026-09-05): `/usage`-Befehl — Kontext-Verbrauch der aktiven Session aus dem Session-Transkript (letzter API-Call, Subagenten ausgefiltert), Kontextfenster wird je Auftrag aus dem Result-JSON gemerkt statt hartcodiert; ab 70 % Hinweis auf `/clear`
 - **v6.1** (2026-09-04): stdin des Claude-Prozesses wird sofort geschlossen (spart 3 Sekunden Wartezeit je Auftrag); Fehlermeldungen zeigen das Ende der Meldung statt des Kommando-Echos — da steht die Ursache
 - **v6** (2026-09-04): `/modell`-Befehl, Sprachmodell je Session

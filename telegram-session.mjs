@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Session-Bot v11: steuert Claude-Code-Sessions auf dem VPS per Telegram.
+// Session-Bot v11.1: steuert Claude-Code-Sessions auf dem VPS per Telegram.
 // Jede normale Nachricht ist ein Auftrag an die aktive Session.
 // v2: Projektverzeichnis waehlbar. v3: /clear, Web-Zugriff, Freigabe-Buttons. v4: /modus je Session.
 // v5: Button-Klick editiert die Anfrage-Nachricht (ERLAUBT/ABGELEHNT sichtbar), realistische Antwortzeit-Ansagen.
@@ -13,9 +13,11 @@
 // v11: fuenf Ideen aus Lars Nowaks Fork - Schutzzweig in Git-Verzeichnissen, persistente Warteschlange
 //      (/fortsetzen, /verwerfen), Capability-Ping im Leerlauf, Fortschrittsanzeige per editMessageText,
 //      Kostenzaehlung je Session aus total_cost_usd.
+// v11.1: Sicherheitshaertung - Session-Titel mit fuehrenden -- werden nicht mehr als claude-Flag
+//        geparst (Arg-Injection ueber /rc), PERM_DIR beim Start hart auf 0700.
 // Hinweis: Der Modus "voll" (bypassPermissions) funktioniert nicht, wenn der Bot als root laeuft - Claude Code verweigert das grundsaetzlich.
 // Befehle: /neu [projekt|/pfad] [Auftrag], /projekte [add name /pfad], /modus [name], /modell [name], /sessions, /wechsel N, /status, /usage, /clear, /ende, /remote-control [aus], /fortsetzen, /verwerfen
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync, chmodSync } from "node:fs";
 import { execFile } from "node:child_process";
 
 const TOKEN = process.env.BOT_TOKEN;
@@ -208,6 +210,8 @@ async function permWatch() {
     }
   } catch (e) { console.error(new Date().toISOString(), "PermWatch:", (e && e.message) || e); }
 }
+// Sicherheit: PERM_DIR hart auf 0700 - mkdirSync(mode) greift nicht auf ein vorhandenes Verzeichnis
+try { mkdirSync(PERM_DIR, { recursive: true, mode: 0o700 }); chmodSync(PERM_DIR, 0o700); } catch {}
 setInterval(permWatch, 1000);
 
 // v10: Remote Control - die aktive Session laeuft interaktiv in tmux weiter und ist
@@ -344,7 +348,7 @@ function pingClaude() {
 setInterval(pingClaude, 15 * 60 * 1000);
 
 let offset = 0;
-console.log(new Date().toISOString(), "Session-Bot v11 gestartet");
+console.log(new Date().toISOString(), "Session-Bot v11.1 gestartet");
 if (wartend.length) {
   await send(`Vom letzten Neustart uebrig: ${wartend.length} wartende(r) Auftrag/Auftraege:\n` + wartend.map((w, i) => `${i + 1}. ${String(w.text).slice(0, 60)}`).join("\n") + "\n\n/fortsetzen fuehrt sie aus, /verwerfen loescht sie.");
 }
@@ -517,7 +521,7 @@ while (true) {
         if (!da.e) { await send("Remote Control laeuft schon fuer diese Session. Beenden mit /remote-control aus"); continue; }
         vertrauen(cur.cwd || DEFAULT_CWD);
         const start = await execP("tmux", ["new-session", "-d", "-s", tn, "-c", cur.cwd || DEFAULT_CWD,
-          CLAUDE, "--resume", cur.id, "--remote-control", (cur.titel || "Session").slice(0, 30)]);
+          CLAUDE, "--resume", cur.id, "--remote-control", ((cur.titel || "Session").replace(/^[-\s]+/, "").slice(0, 30) || "Session")]);
         if (start.e) { await send("tmux-Start fehlgeschlagen: " + String(start.err || (start.e && start.e.message) || "").slice(-200)); continue; }
         await send("Remote Control startet, ein paar Sekunden...");
         await new Promise((r) => setTimeout(r, 9000));

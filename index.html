@@ -71,7 +71,7 @@ footer{margin-top:64px;padding-top:20px;border-top:1px solid var(--line);
 </header>
 <nav class="toc"><strong>Inhalt</strong><ul><li><a href="#1-was-ist-das">1. Was ist das?</a></li><li><a href="#2-wie-funktioniert-es">2. Wie funktioniert es?</a></li><li><a href="#3-nachbau-schritt-für-schritt">3. Nachbau Schritt für Schritt</a></li><li><a href="#4-referenz-befehle-modi-parameter">4. Referenz: Befehle, Modi, Parameter</a></li></ul></nav>
 <p>Eine Anleitung zum 1:1-Nachbau. Alle persönlichen Werte sind Platzhalter in spitzen Klammern: <code>&lt;BOT_TOKEN&gt;</code>, <code>&lt;CHAT_ID&gt;</code>, <code>&lt;DEIN-SERVER&gt;</code>.</p>
-<p><strong>Neu in v9 bis v11 (07.09.2026):</strong> <code>/neu &lt;name&gt;</code> legt Projektverzeichnisse jetzt selbst an (v9). <code>/remote-control</code> bzw. <code>/rc</code> führt die aktive Session in der Claude-App oder auf claude.ai/code weiter — der Bot startet <code>claude --resume --remote-control</code> in tmux und meldet die App-URL; einmalig braucht der Token dafür einen frischen <code>/login</code> (Scope <code>user:sessions:claude_code</code>) (v10). Dazu fünf Verbesserungen aus einem Community-Fork (v11): <strong>Schutzzweig</strong> in Git-Verzeichnissen (der Bot legt den Zweig vor dem Lauf an, nicht das Modell — die Sicherung ist damit nicht per Prompt Injection aushebelbar), <strong>persistente Warteschlange</strong> mit <code>/fortsetzen</code>/<code>/verwerfen</code> nach Neustarts, <strong>Capability-Ping</strong> (alle 6 h beweist ein Mini-Lauf im Leerlauf, dass Claude wirklich antwortet — ein Prozess-Check bemerkt „Dienst läuft, Login tot" nicht), <strong>stille Fortschrittsanzeige</strong> ab 20 s Laufzeit per <code>editMessageText</code> und <strong>Kostenzählung</strong> je Session. Neu vorausgesetzt: <code>tmux</code> für Remote Control, <code>git</code> optional für den Schutzzweig. Weiterhin gilt: <strong>Unter root funktioniert der Modus <code>voll</code> nicht</strong> — wer ihn will, betreibt den Bot als eigenen unprivilegierten Benutzer.</p>
+<p><strong>Neu in v9 bis v11.1 (07.09.2026):</strong> <code>/neu &lt;name&gt;</code> legt Projektverzeichnisse jetzt selbst an (v9). <code>/remote-control</code> bzw. <code>/rc</code> führt die aktive Session in der Claude-App oder auf claude.ai/code weiter — der Bot startet <code>claude --resume --remote-control</code> in tmux und meldet die App-URL; einmalig braucht der Token dafür einen frischen <code>/login</code> (Scope <code>user:sessions:claude_code</code>) (v10). Dazu fünf Verbesserungen aus einem Community-Fork (v11): <strong>Schutzzweig</strong> in Git-Verzeichnissen (der Bot legt den Zweig vor dem Lauf an, nicht das Modell — die Sicherung ist damit nicht per Prompt Injection aushebelbar), <strong>persistente Warteschlange</strong> mit <code>/fortsetzen</code>/<code>/verwerfen</code> nach Neustarts, <strong>Capability-Ping</strong> (alle 6 h beweist ein Mini-Lauf im Leerlauf, dass Claude wirklich antwortet — ein Prozess-Check bemerkt „Dienst läuft, Login tot" nicht), <strong>stille Fortschrittsanzeige</strong> ab 20 s Laufzeit per <code>editMessageText</code> und <strong>Kostenzählung</strong> je Session. Neu vorausgesetzt: <code>tmux</code> für Remote Control, <code>git</code> optional für den Schutzzweig. Weiterhin gilt: <strong>Unter root funktioniert der Modus <code>voll</code> nicht</strong> — wer ihn will, betreibt den Bot als eigenen unprivilegierten Benutzer. <strong>v11.1</strong> ergänzt eine Sicherheitshärtung: Session-Titel mit führenden <code>--</code> werden nicht mehr als <code>claude</code>-Flag geparst, und das Freigabe-Verzeichnis wird beim Start hart auf <code>0700</code> gezogen.</p>
 <h2 id="1-was-ist-das">1. Was ist das?</h2>
 <p>Ein selbstgebauter Telegram-Bot (ein Node-Script, null Fremdpakete), mit dem du Claude-Code-Sessions auf einem Linux-Server vom Handy aus steuerst:</p>
 <ul>
@@ -211,7 +211,7 @@ rl.on("line", async (line) =&gt; {
 <h3 id="3-7-den-bot-anlegen-root-bin-telegram-session-mjs">3.7 Den Bot anlegen: <code>/root/bin/telegram-session.mjs</code></h3>
 <p>Die Konstante <code>HOST</code> unten auf deinen Servernamen setzen (wird nur für den SSH-Hinweis in <code>/status</code> gebraucht).</p>
 <pre data-lang="javascript"><code>#!/usr/bin/env node
-// Session-Bot v11: steuert Claude-Code-Sessions auf dem VPS per Telegram.
+// Session-Bot v11.1: steuert Claude-Code-Sessions auf dem VPS per Telegram.
 // Jede normale Nachricht ist ein Auftrag an die aktive Session.
 // v2: Projektverzeichnis waehlbar. v3: /clear, Web-Zugriff, Freigabe-Buttons. v4: /modus je Session.
 // v5: Button-Klick editiert die Anfrage-Nachricht (ERLAUBT/ABGELEHNT sichtbar), realistische Antwortzeit-Ansagen.
@@ -225,9 +225,11 @@ rl.on("line", async (line) =&gt; {
 // v11: fuenf Ideen aus Lars Nowaks Fork - Schutzzweig in Git-Verzeichnissen, persistente Warteschlange
 //      (/fortsetzen, /verwerfen), Capability-Ping im Leerlauf, Fortschrittsanzeige per editMessageText,
 //      Kostenzaehlung je Session aus total_cost_usd.
+// v11.1: Sicherheitshaertung - Session-Titel mit fuehrenden -- werden nicht mehr als claude-Flag
+//        geparst (Arg-Injection ueber /rc), PERM_DIR beim Start hart auf 0700.
 // Hinweis: Der Modus "voll" (bypassPermissions) funktioniert nicht, wenn der Bot als root laeuft - Claude Code verweigert das grundsaetzlich.
 // Befehle: /neu [projekt|/pfad] [Auftrag], /projekte [add name /pfad], /modus [name], /modell [name], /sessions, /wechsel N, /status, /usage, /clear, /ende, /remote-control [aus], /fortsetzen, /verwerfen
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync, chmodSync } from "node:fs";
 import { execFile } from "node:child_process";
 
 const TOKEN = process.env.BOT_TOKEN;
@@ -420,6 +422,8 @@ async function permWatch() {
     }
   } catch (e) { console.error(new Date().toISOString(), "PermWatch:", (e &amp;&amp; e.message) || e); }
 }
+// Sicherheit: PERM_DIR hart auf 0700 - mkdirSync(mode) greift nicht auf ein vorhandenes Verzeichnis
+try { mkdirSync(PERM_DIR, { recursive: true, mode: 0o700 }); chmodSync(PERM_DIR, 0o700); } catch {}
 setInterval(permWatch, 1000);
 
 // v10: Remote Control - die aktive Session laeuft interaktiv in tmux weiter und ist
@@ -556,7 +560,7 @@ function pingClaude() {
 setInterval(pingClaude, 15 * 60 * 1000);
 
 let offset = 0;
-console.log(new Date().toISOString(), "Session-Bot v11 gestartet");
+console.log(new Date().toISOString(), "Session-Bot v11.1 gestartet");
 if (wartend.length) {
   await send(`Vom letzten Neustart uebrig: ${wartend.length} wartende(r) Auftrag/Auftraege:\n` + wartend.map((w, i) =&gt; `${i + 1}. ${String(w.text).slice(0, 60)}`).join("\n") + "\n\n/fortsetzen fuehrt sie aus, /verwerfen loescht sie.");
 }
@@ -729,7 +733,7 @@ while (true) {
         if (!da.e) { await send("Remote Control laeuft schon fuer diese Session. Beenden mit /remote-control aus"); continue; }
         vertrauen(cur.cwd || DEFAULT_CWD);
         const start = await execP("tmux", ["new-session", "-d", "-s", tn, "-c", cur.cwd || DEFAULT_CWD,
-          CLAUDE, "--resume", cur.id, "--remote-control", (cur.titel || "Session").slice(0, 30)]);
+          CLAUDE, "--resume", cur.id, "--remote-control", ((cur.titel || "Session").replace(/^[-\s]+/, "").slice(0, 30) || "Session")]);
         if (start.e) { await send("tmux-Start fehlgeschlagen: " + String(start.err || (start.e &amp;&amp; start.e.message) || "").slice(-200)); continue; }
         await send("Remote Control startet, ein paar Sekunden...");
         await new Promise((r) =&gt; setTimeout(r, 9000));
@@ -837,7 +841,7 @@ journalctl -u telegram-session -f         # Log live</code></pre>
 <li>Antwortzeit einfacher Aufträge: gemessen 13–38 Sekunden (vor v6.1; das sofort geschlossene stdin spart seither weitere ~3 Sekunden); lange Antworten werden auf mehrere Telegram-Nachrichten gesplittet (Limit 4096 Zeichen)</li>
 <li>Je Zeitpunkt läuft genau ein Auftrag; weitere Nachrichten werden eingereiht und danach abgearbeitet</li>
 </ul>
-<footer>Stand 07.09.2026 · Bot v11 · Alle persönlichen Werte sind Platzhalter: &lt;BOT_TOKEN&gt;, &lt;CHAT_ID&gt;, &lt;DEIN-SERVER&gt;</footer>
+<footer>Stand 07.09.2026 · Bot v11.1 · Alle persönlichen Werte sind Platzhalter: &lt;BOT_TOKEN&gt;, &lt;CHAT_ID&gt;, &lt;DEIN-SERVER&gt;</footer>
 </div>
 </body>
 </html>

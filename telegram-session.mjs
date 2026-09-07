@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Session-Bot v8: steuert Claude-Code-Sessions auf dem VPS per Telegram.
+// Session-Bot v11: steuert Claude-Code-Sessions auf dem VPS per Telegram.
 // Jede normale Nachricht ist ein Auftrag an die aktive Session.
 // v2: Projektverzeichnis waehlbar. v3: /clear, Web-Zugriff, Freigabe-Buttons. v4: /modus je Session.
 // v5: Button-Klick editiert die Anfrage-Nachricht (ERLAUBT/ABGELEHNT sichtbar), realistische Antwortzeit-Ansagen.
@@ -8,9 +8,14 @@
 // v7: /usage-Befehl - Kontext-Verbrauch der aktiven Session aus dem Transkript, Kontextfenster je Lauf aus modelUsage gemerkt.
 // v8: is_error wird geprueft (API-Fehler kamen als Exit 0 durch), Bot-Token nicht mehr an den
 //     Claude-Subprozess, Permission-MCP v3 tokenlos ueber Dateien, Modus standard=manual plus auto.
+// v9: /neu <name> (ein Wort) legt ein neues Projektverzeichnis unter /root/projekte an und registriert es.
+// v10: /remote-control (Kurzform /rc) fuehrt die aktive Session in der Claude-App weiter - tmux + claude --resume --remote-control.
+// v11: fuenf Ideen aus Lars Nowaks Fork - Schutzzweig in Git-Verzeichnissen, persistente Warteschlange
+//      (/fortsetzen, /verwerfen), Capability-Ping im Leerlauf, Fortschrittsanzeige per editMessageText,
+//      Kostenzaehlung je Session aus total_cost_usd.
 // Hinweis: Der Modus "voll" (bypassPermissions) funktioniert nicht, wenn der Bot als root laeuft - Claude Code verweigert das grundsaetzlich.
-// Befehle: /neu [projekt|/pfad] [Auftrag], /projekte [add name /pfad], /modus [name], /modell [name], /sessions, /wechsel N, /status, /usage, /clear, /ende
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
+// Befehle: /neu [projekt|/pfad] [Auftrag], /projekte [add name /pfad], /modus [name], /modell [name], /sessions, /wechsel N, /status, /usage, /clear, /ende, /remote-control [aus], /fortsetzen, /verwerfen
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync } from "node:fs";
 import { execFile } from "node:child_process";
 
 const TOKEN = process.env.BOT_TOKEN;
@@ -18,6 +23,7 @@ const CHAT_ID = Number(process.env.CHAT_ID);
 const API = `https://api.telegram.org/bot${TOKEN}`;
 const REG = "/root/.claude-sessions.json";
 const PROJ = "/root/.config/claude-projekte.json";
+const PROJEKTE_DIR = "/root/projekte"; // v9: Ablage fuer per /neu angelegte Projekte
 const PERM_DIR = "/root/.perm";
 const DEFAULT_CWD = "/root/vault";
 const DEFAULT_MODE = "acceptEdits";
@@ -91,6 +97,73 @@ async function send(text) {
   }
 }
 
+// v11: Nachricht senden und die message_id behalten (fuer die Fortschrittsanzeige)
+async function sendMitId(text) {
+  try {
+    const r = await fetch(`${API}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: CHAT_ID, text: String(text).slice(0, 3900) }) });
+    return (await r.json())?.result?.message_id ?? null;
+  } catch { return null; }
+}
+// v11: Nachricht still umschreiben - ein Edit loest am Handy keine Benachrichtigung aus
+async function edit(mid, text) {
+  try {
+    await fetch(`${API}/editMessageText`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: CHAT_ID, message_id: mid, text: String(text).slice(0, 3900) }) });
+  } catch {}
+}
+// v11: juengstes Transkript im Projektverzeichnis, das seit Auftragsstart gewachsen ist
+function neuestesTranskript(cwd, seit) {
+  try {
+    const dir = PROJECTS + "/" + String(cwd || DEFAULT_CWD).replace(/\//g, "-");
+    let best = null, bt = seit;
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith(".jsonl")) continue;
+      const m = statSync(`${dir}/${f}`).mtimeMs;
+      if (m > bt) { bt = m; best = `${dir}/${f}`; }
+    }
+    return best;
+  } catch { return null; }
+}
+// v11: letzte Aktivitaet aus dem Live-Transkript ziehen
+function fortschrittText(pfad) {
+  try {
+    const zeilen = readFileSync(pfad, "utf8").trim().split("\n");
+    for (let i = zeilen.length - 1; i >= 0; i--) {
+      if (!zeilen[i].includes(String.fromCharCode(34) + "assistant" + String.fromCharCode(34))) continue;
+      let j; try { j = JSON.parse(zeilen[i]); } catch { continue; }
+      if (j.type !== "assistant" || j.isSidechain) continue;
+      for (const b of [...(j.message?.content || [])].reverse()) {
+        if (b.type === "tool_use") { const d = b.input && (b.input.file_path || b.input.path || b.input.command); return "Werkzeug " + b.name + (d ? ": " + String(d).slice(-60) : ""); }
+        if (b.type === "text" && b.text && b.text.trim()) return "Schreibt: " + b.text.trim().slice(0, 70);
+      }
+    }
+  } catch {}
+  return null;
+}
+// v11: Schutzzweig - nur in Git-Verzeichnissen, ein Zweig je Session. Der Bot legt ihn VOR dem
+// Lauf an, damit die Sicherung im Bot liegt und nicht in der Bitte an das Modell.
+async function schutzzweig(cwd, sess) {
+  try {
+    const g = await execP("git", ["-C", cwd, "rev-parse", "--is-inside-work-tree"]);
+    if (g.e || !/true/.test(g.out)) return null;
+    if (sess && sess.zweig) return sess.zweig;
+    const name = "bot/" + Date.now().toString(36);
+    const b = await execP("git", ["-C", cwd, "checkout", "-b", name]);
+    return b.e ? null : name;
+  } catch { return null; }
+}
+async function zweigCommit(cwd, msg) {
+  try {
+    await execP("git", ["-C", cwd, "add", "-A"]);
+    const c = await execP("git", ["-C", cwd, "-c", "user.name=Session-Bot", "-c", "user.email=bot@localhost", "commit", "-m", ("Bot: " + msg).slice(0, 72)]);
+    if (c.e) return null;
+    const st = await execP("git", ["-C", cwd, "show", "--stat", "--format=", "HEAD"]);
+    const letzte = st.out.trim().split("\n").pop() || "";
+    return letzte.trim() || "Commit erstellt";
+  } catch { return null; }
+}
+
 // v8-Fix 3: Gegenstueck zum tokenlosen Permission-MCP. Der MCP legt die Anfrage als
 // PERM_DIR/<id>.req ab, dieser Watcher verschickt sie und schreibt die Antwort als
 // PERM_DIR/<id> zurueck (siehe Button-Handler in der Hauptschleife weiter unten).
@@ -137,6 +210,24 @@ async function permWatch() {
 }
 setInterval(permWatch, 1000);
 
+// v10: Remote Control - die aktive Session laeuft interaktiv in tmux weiter und ist
+// im Code-Tab der Claude-App bzw. unter claude.ai/code steuerbar. tmux-Argumente als
+// argv-Array, nie als Shell-String (Quoting-Kante aus dem Fork-Review).
+const execP = (cmd, args) => new Promise((res) => execFile(cmd, args, { env: ENV }, (e, out, err) => res({ e, out: String(out || ""), err: String(err || "") })));
+const rcName = (sid) => "rc-" + String(sid).replace(/[^a-z0-9]/gi, "").slice(0, 12);
+function vertrauen(cwd) {
+  // Workspace-Trust vorab setzen - der interaktive Start verweigert sonst mit "Workspace not trusted"
+  try {
+    const cfgPfad = "/root/.claude.json";
+    const cfg = JSON.parse(readFileSync(cfgPfad, "utf8"));
+    cfg.projects = cfg.projects || {};
+    const pr = (cfg.projects[cwd] = cfg.projects[cwd] || {});
+    if (pr.hasTrustDialogAccepted && pr.hasCompletedProjectOnboarding) return;
+    pr.hasTrustDialogAccepted = true; pr.hasCompletedProjectOnboarding = true;
+    writeFileSync(cfgPfad, JSON.stringify(cfg, null, 2));
+  } catch (e) { console.error(new Date().toISOString(), "Trust:", (e && e.message) || e); }
+}
+
 function runClaude(auftrag, resumeId, cwd, modus, modell) {
   return new Promise((resolve) => {
     const args = ["-p", auftrag, "--output-format", "json", "--permission-mode", modus || DEFAULT_MODE,
@@ -163,7 +254,7 @@ function runClaude(auftrag, resumeId, cwd, modus, modell) {
           const inp = (mu.inputTokens || 0) + (mu.cacheReadInputTokens || 0) + (mu.cacheCreationInputTokens || 0);
           if (mu.contextWindow && inp > meiste) { meiste = inp; fenster = mu.contextWindow; }
         }
-        resolve({ ok: true, result: j.result || "(kein Ergebnis)", sid: j.session_id || resumeId || null, fenster });
+        resolve({ ok: true, result: j.result || "(kein Ergebnis)", sid: j.session_id || resumeId || null, fenster, kosten: j.total_cost_usd || 0 });
       } catch {
         resolve({ ok: false, error: "Antwort nicht lesbar: " + String(out).slice(0, 300) });
       }
@@ -174,26 +265,53 @@ function runClaude(auftrag, resumeId, cwd, modus, modell) {
 
 const queue = [];
 let busy = false;
+// v11: Warteschlange ueberlebt Neustarts. Uebrige Auftraege werden beim Start gemeldet,
+// /fortsetzen fuehrt sie aus, /verwerfen loescht sie - nie stillschweigend weiterlaufen.
+const QDATEI = "/root/.claude-queue.json";
+let wartend = [];
+const saveQueue = () => { try { writeFileSync(QDATEI, JSON.stringify([...queue, ...wartend]), { mode: 0o600 }); } catch {} };
+try { if (existsSync(QDATEI)) { wartend = JSON.parse(readFileSync(QDATEI, "utf8")) || []; } } catch {}
 async function pump() {
   if (busy) return;
   busy = true;
   while (queue.length) {
     const item = queue.shift();
+    saveQueue();
     const reg = load();
     const cur = reg.sessions.find((s) => s.id === reg.aktiv) || null;
     const cwd = cur ? (cur.cwd || DEFAULT_CWD) : (item.cwd || reg.naechstesCwd || DEFAULT_CWD);
     const modus = cur ? (cur.modus || DEFAULT_MODE) : (reg.naechsterModus || DEFAULT_MODE);
     const modell = cur ? (cur.modell || null) : (reg.naechstesModell || null);
+    // v11: Schutzzweig (nur Git), Fortschrittsanzeige ab 20 s, dann der eigentliche Lauf
+    const zweig = await schutzzweig(cwd, cur);
+    const startZeit = Date.now();
+    let fortMid = null;
+    const ticker = setInterval(async () => {
+      const sek = Math.round((Date.now() - startZeit) / 1000);
+      if (sek < 20) return;
+      const tp = neuestesTranskript(cwd, startZeit);
+      const f = tp ? fortschrittText(tp) : null;
+      const t = `Auftrag laeuft seit ${sek} s...` + (f ? "\n" + f : "");
+      if (fortMid === null) { fortMid = -1; const m = await sendMitId(t); fortMid = m || -1; }
+      else if (fortMid > 0) await edit(fortMid, t);
+    }, 10000);
     const r = await runClaude(item.text, cur ? cur.id : null, cwd, modus, modell);
+    clearInterval(ticker);
+    if (fortMid > 0) await edit(fortMid, `Fertig nach ${Math.round((Date.now() - startZeit) / 1000)} s.`);
     if (!r.ok) { await send("Fehlgeschlagen: " + r.error); continue; }
+    let zweigInfo = "";
+    if (zweig) {
+      const stat = await zweigCommit(cwd, item.text);
+      zweigInfo = `\n\n(Arbeitszweig ${zweig}${stat ? ": " + stat : ", keine Dateiaenderungen"} - uebernehmen am Rechner per git merge)`;
+    }
     const reg2 = load();
     if (cur) {
       // resume liefert eine neue Session-ID: uebernehmen, sonst setzt der naechste Auftrag am alten Punkt an
       const s = reg2.sessions.find((x) => x.id === cur.id);
-      if (s) { s.id = r.sid || s.id; s.zuletzt = Date.now(); if (r.fenster) s.fenster = r.fenster; }
+      if (s) { s.id = r.sid || s.id; s.zuletzt = Date.now(); if (r.fenster) s.fenster = r.fenster; s.kosten = (s.kosten || 0) + (r.kosten || 0); if (zweig) s.zweig = zweig; }
       if (reg2.aktiv === cur.id) reg2.aktiv = r.sid || cur.id;
     } else if (r.sid && !reg2.sessions.some((x) => x.id === r.sid)) {
-      reg2.sessions.push({ id: r.sid, titel: item.text.slice(0, 48), cwd, modus, modell, fenster: r.fenster || null, erstellt: Date.now(), zuletzt: Date.now() });
+      reg2.sessions.push({ id: r.sid, titel: item.text.slice(0, 48), cwd, modus, modell, fenster: r.fenster || null, kosten: r.kosten || 0, zweig: zweig || null, erstellt: Date.now(), zuletzt: Date.now() });
       if (reg2.sessions.length > 15) reg2.sessions = reg2.sessions.slice(-15);
       if (!reg2.aktiv) reg2.aktiv = r.sid;
       reg2.naechstesCwd = null;
@@ -201,13 +319,35 @@ async function pump() {
       reg2.naechstesModell = null;
     }
     save(reg2);
-    await send(r.result);
+    await send(r.result + zweigInfo);
   }
   busy = false;
 }
 
+// v11: Capability-Ping - im Leerlauf beweist ein Mini-Lauf, dass Claude wirklich antworten
+// kann. Ein Prozess-Check haette "Dienst laeuft, Login tot" nie bemerkt (Lars, 04.09.).
+let letzterPing = 0;
+const PING_ALLE = 6 * 3600 * 1000;
+function pingClaude() {
+  if (busy || queue.length || Date.now() - letzterPing < PING_ALLE) return;
+  letzterPing = Date.now();
+  execFile(CLAUDE, ["-p", "Antworte nur mit OK", "--output-format", "json", "--model", "claude-haiku-4-5"],
+    { cwd: DEFAULT_CWD, env: ENV, timeout: 240000, maxBuffer: 1024 * 1024 }, async (e, out) => {
+    try {
+      const j = JSON.parse(String(out));
+      if (j.is_error === true) await send("Selbsttest fehlgeschlagen - Claude meldet: " + String(j.result || j.api_error_status || "unbekannt").slice(0, 200));
+    } catch {
+      await send("Selbsttest fehlgeschlagen - keine lesbare Antwort von Claude" + (e ? " (" + String((e && e.message) || e).slice(-150) + ")" : ""));
+    }
+  });
+}
+setInterval(pingClaude, 15 * 60 * 1000);
+
 let offset = 0;
-console.log(new Date().toISOString(), "Session-Bot v8 gestartet");
+console.log(new Date().toISOString(), "Session-Bot v11 gestartet");
+if (wartend.length) {
+  await send(`Vom letzten Neustart uebrig: ${wartend.length} wartende(r) Auftrag/Auftraege:\n` + wartend.map((w, i) => `${i + 1}. ${String(w.text).slice(0, 60)}`).join("\n") + "\n\n/fortsetzen fuehrt sie aus, /verwerfen loescht sie.");
+}
 while (true) {
   try {
     const res = await fetch(`${API}/getUpdates?timeout=50&offset=${offset}`);
@@ -250,7 +390,7 @@ while (true) {
       const cur = reg.sessions.find((s) => s.id === reg.aktiv) || null;
 
       if (text === "/start") {
-        await send("Session-Bot bereit. Jede Nachricht ist ein Auftrag an die aktive Claude-Session. Befehle:\n/neu [projekt] [Auftrag] - neue Session, Verzeichnis waehlbar\n/projekte - Verzeichnisse zeigen, mit add registrieren\n/modus [standard|edits|plan|voll] - Berechtigungsmodus je Session\n/modell [opus|sonnet|haiku|standard] - Sprachmodell je Session\n/sessions - alle Sessions\n/wechsel N - Session wechseln\n/status - Stand plus SSH-Befehl zum Fortsetzen am Rechner\n/usage - Kontext-Verbrauch der aktiven Session\n/clear - Kontext leeren, frisch im selben Verzeichnis\n/ende - aktive Session ablegen\nWeb-Suche ist erlaubt. Braucht Claude weitere Rechte, kommt eine Freigabe-Anfrage mit Buttons (5 Minuten Zeit, dein Klick wird direkt in der Nachricht bestaetigt). " + DAUER);
+        await send("Session-Bot bereit. Jede Nachricht ist ein Auftrag an die aktive Claude-Session. Befehle:\n/neu [projekt] [Auftrag] - neue Session, Verzeichnis waehlbar\n/projekte - Verzeichnisse zeigen, mit add registrieren\n/modus [standard|edits|plan|voll] - Berechtigungsmodus je Session\n/modell [opus|sonnet|haiku|standard] - Sprachmodell je Session\n/sessions - alle Sessions\n/wechsel N - Session wechseln\n/status - Stand plus SSH-Befehl zum Fortsetzen am Rechner\n/usage - Kontext-Verbrauch der aktiven Session\n/clear - Kontext leeren, frisch im selben Verzeichnis\n/ende - aktive Session ablegen\n/remote-control bzw. /rc - Session in der Claude-App weiterfuehren, /rc aus beendet\n/fortsetzen, /verwerfen - nach einem Neustart wartende Auftraege starten oder loeschen\nWeb-Suche ist erlaubt. Braucht Claude weitere Rechte, kommt eine Freigabe-Anfrage mit Buttons (5 Minuten Zeit, dein Klick wird direkt in der Nachricht bestaetigt). " + DAUER);
         continue;
       }
       if (text === "/modus" || text.startsWith("/modus ")) {
@@ -322,7 +462,7 @@ while (true) {
       if (text === "/status") {
         const lage = busy ? `Ein Auftrag laeuft gerade${queue.length ? `, ${queue.length} in Warteschlange` : ""}.` : "Bereit.";
         if (cur) {
-          await send(`Aktive Session: ${cur.titel}\nVerzeichnis: ${cur.cwd || DEFAULT_CWD}\nModus: ${modusName(cur.modus)}\nModell: ${modellName(cur.modell)}\nZuletzt: ${wann(cur.zuletzt)}\n${lage}\n\nAm Rechner fortsetzen:\nssh root@${HOST}\ncd "${cur.cwd || DEFAULT_CWD}" && claude --resume ${cur.id}`);
+          await send(`Aktive Session: ${cur.titel}\nVerzeichnis: ${cur.cwd || DEFAULT_CWD}\nModus: ${modusName(cur.modus)}\nModell: ${modellName(cur.modell)}\nZuletzt: ${wann(cur.zuletzt)}${cur.kosten ? ` - Kosten ueber den Bot: $${Number(cur.kosten).toFixed(2)}` : ""}\n${lage}\n\nAm Rechner fortsetzen:\nssh root@${HOST}\ncd "${cur.cwd || DEFAULT_CWD}" && claude --resume ${cur.id}`);
         } else {
           await send(`Keine aktive Session. ${lage}`);
         }
@@ -335,7 +475,7 @@ while (true) {
         const fenster = cur.fenster || FENSTER_FALLBACK;
         const prozent = Math.min(100, Math.round((k.kontext / fenster) * 100));
         const balken = "#".repeat(Math.round(prozent / 10)).padEnd(10, "-");
-        await send(`Kontext der Session "${cur.titel}":\n[${balken}] ${prozent} %\n${tsd(k.kontext)} von ${tsd(fenster)} Token${cur.fenster ? "" : " (Fenster geschaetzt, nach dem naechsten Auftrag exakt)"}\nModell: ${k.modell || modellName(cur.modell)}${prozent >= 70 ? "\n\nWird es eng: /clear leert den Kontext, das Verzeichnis bleibt." : ""}`);
+        await send(`Kontext der Session "${cur.titel}":\n[${balken}] ${prozent} %\n${tsd(k.kontext)} von ${tsd(fenster)} Token${cur.fenster ? "" : " (Fenster geschaetzt, nach dem naechsten Auftrag exakt)"}\nModell: ${k.modell || modellName(cur.modell)}${cur.kosten ? `\nKosten ueber den Bot: $${Number(cur.kosten).toFixed(2)}` : ""}${prozent >= 70 ? "\n\nWird es eng: /clear leert den Kontext, das Verzeichnis bleibt." : ""}`);
         continue;
       }
       if (text === "/clear") {
@@ -352,6 +492,52 @@ while (true) {
         await send(`Abgelegt: ${cur.titel}. Das Transkript bleibt auf dem Server erhalten.`);
         continue;
       }
+      if (text === "/fortsetzen") {
+        if (!wartend.length) { await send("Keine wartenden Auftraege."); continue; }
+        queue.push(...wartend); wartend = []; saveQueue();
+        await send(`${queue.length} Auftrag/Auftraege wieder eingereiht. ${DAUER}`); pump();
+        continue;
+      }
+      if (text === "/verwerfen") {
+        if (!wartend.length) { await send("Keine wartenden Auftraege."); continue; }
+        const n = wartend.length; wartend = []; saveQueue();
+        await send(`${n} wartende(r) Auftrag/Auftraege verworfen.`);
+        continue;
+      }
+      if (text === "/remote-control" || text.startsWith("/remote-control ") || text === "/rc" || text.startsWith("/rc ")) {
+        const arg = (text.startsWith("/remote-control") ? text.slice(15) : text.slice(3)).trim().toLowerCase();
+        if (!cur) { await send("Keine aktive Session. Erst /neu oder /wechsel."); continue; }
+        const tn = rcName(cur.id);
+        if (arg === "aus" || arg === "stop") {
+          const k = await execP("tmux", ["kill-session", "-t", tn]);
+          await send(k.e ? "Kein Remote Control aktiv fuer diese Session." : `Remote Control beendet: "${cur.titel}". Die Session bleibt erhalten.`);
+          continue;
+        }
+        const da = await execP("tmux", ["has-session", "-t", tn]);
+        if (!da.e) { await send("Remote Control laeuft schon fuer diese Session. Beenden mit /remote-control aus"); continue; }
+        vertrauen(cur.cwd || DEFAULT_CWD);
+        const start = await execP("tmux", ["new-session", "-d", "-s", tn, "-c", cur.cwd || DEFAULT_CWD,
+          CLAUDE, "--resume", cur.id, "--remote-control", (cur.titel || "Session").slice(0, 30)]);
+        if (start.e) { await send("tmux-Start fehlgeschlagen: " + String(start.err || (start.e && start.e.message) || "").slice(-200)); continue; }
+        await send("Remote Control startet, ein paar Sekunden...");
+        await new Promise((r) => setTimeout(r, 9000));
+        let pane = await execP("tmux", ["capture-pane", "-t", tn, "-p", "-J"]);
+        // Falls die einmalige Rueckfrage erscheint, bestaetigen - aber nur dann, sonst wuerde
+        // das y als Nachricht in der Session landen
+        if (!/https:\/\/claude\.ai\/code\//.test(pane.out) && /Enable Remote Control\?/.test(pane.out)) {
+          await execP("tmux", ["send-keys", "-t", tn, "y", "Enter"]);
+          await new Promise((r) => setTimeout(r, 6000));
+          pane = await execP("tmux", ["capture-pane", "-t", tn, "-p", "-J"]);
+        }
+        const url = (pane.out.match(/https:\/\/claude\.ai\/code\/[A-Za-z0-9_-]+/) || [])[0];
+        if (url) {
+          await send(`"${cur.titel}" ist jetzt in der Claude-App: Code-Tab am Handy oder\n${url}\n\nWichtig: Solange Remote Control laeuft, diese Session nicht parallel hier im Bot weiterfuehren. Beenden mit /remote-control aus`);
+        } else {
+          const letzte = pane.out.split("\n").filter((z) => z.trim()).slice(-5).join("\n");
+          await send("Keine App-URL gefunden. Letzte Ausgabe:\n" + letzte.slice(0, 600));
+        }
+        continue;
+      }
       if (text === "/neu" || text.startsWith("/neu ")) {
         const rest = text.slice(4).trim();
         const projekte = loadProj();
@@ -359,13 +545,26 @@ while (true) {
         const erst = rest.split(/\s+/)[0] || "";
         if (projekte[erst.toLowerCase()]) { cwd = projekte[erst.toLowerCase()]; auftrag = rest.slice(erst.length).trim(); }
         else if (erst.startsWith("/") && existsSync(erst)) { cwd = erst; auftrag = rest.slice(erst.length).trim(); }
+        // v9: genau ein unbekanntes, namensartiges Wort -> Projektordner anlegen und registrieren.
+        // Bewusst nur bei einem einzelnen Wort: /neu <freier Auftrag> beginnt mit einem Verb und
+        // wuerde sonst bei jedem Tippfehler ein Muellverzeichnis erzeugen.
+        else if (rest === erst && /^[a-zA-Z0-9][a-zA-Z0-9_-]{1,31}$/.test(erst)) {
+          const nm = erst.toLowerCase();
+          const pf = `${PROJEKTE_DIR}/${nm}`;
+          mkdirSync(pf, { recursive: true });
+          projekte[nm] = pf;
+          writeFileSync(PROJ, JSON.stringify(projekte, null, 2));
+          cwd = pf; auftrag = "";
+          await send(`Neues Projekt angelegt und registriert: ${nm} -> ${pf}`);
+        }
         if (cwd && !existsSync(cwd)) { await send(`Verzeichnis ${cwd} existiert nicht mehr. /projekte zeigt die Liste.`); continue; }
         reg.aktiv = null; reg.naechstesCwd = cwd; save(reg);
-        if (auftrag) { queue.push({ text: auftrag, cwd }); await send(`Neue Session in ${kurz(cwd)} wird eroeffnet, Auftrag laeuft. ${DAUER}`); pump(); }
+        if (auftrag) { queue.push({ text: auftrag, cwd }); saveQueue(); await send(`Neue Session in ${kurz(cwd)} wird eroeffnet, Auftrag laeuft. ${DAUER}`); pump(); }
         else await send(`Alles klar, deine naechste Nachricht eroeffnet eine neue Session in ${kurz(cwd)} (Modus ${modusName(reg.naechsterModus)}).`);
         continue;
       }
       queue.push({ text, cwd: null });
+      saveQueue();
       await send(busy ? `Eingereiht, Position ${queue.length}.` : cur ? `Auftrag laeuft in "${cur.titel}" [${kurz(cur.cwd)}, ${modusName(cur.modus)}]. ${DAUER}` : `Neue Session in ${kurz(reg.naechstesCwd)} wird eroeffnet (Modus ${modusName(reg.naechsterModus)}), Auftrag laeuft. ${DAUER}`);
       pump();
     }

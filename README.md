@@ -83,6 +83,8 @@ sudo bash install.sh          # fragt Token, Chat-ID, Hostname, Arbeitsverzeichn
 | `/wechsel N` | Aktive Session wechseln |
 | `/status` | Stand + SSH-Befehl zum Fortsetzen am Rechner |
 | `/usage` | Kontext-Verbrauch der aktiven Session: Balken, Prozent, Token-Stand, Modell |
+| `/remote-control` bzw. `/rc` [aus] | Aktive Session in der Claude-App bzw. auf claude.ai/code weiterführen; `aus` beendet |
+| `/fortsetzen` / `/verwerfen` | Nach einem Neustart wartende Aufträge ausführen oder löschen |
 | `/clear` | Kontext leeren, frisch im selben Verzeichnis |
 | `/ende` | Session ablegen (Transkript bleibt unter `~/.claude/projects/`) |
 
@@ -97,6 +99,8 @@ sudo bash install.sh          # fragt Token, Chat-ID, Hostname, Arbeitsverzeichn
 | `permission-mcp.mjs` | `PERM_TIMEOUT_MS` (Env, Standard `300000`) | Wartezeit auf den Button (5 Min), danach abgelehnt |
 | `telegram-session.mjs` | `PERM_DIR` | Austauschverzeichnis zwischen Bot und Permission-MCP (Standard `/root/.perm`) |
 | `claude-projekte.json` | Name → Pfad | Projekt-Kurznamen für `/neu` |
+| `telegram-session.mjs` | `PING_ALLE` | Abstand des Capability-Pings (6 h), erster Lauf 15 min nach Start |
+| `telegram-session.mjs` | `20` und `10000` im Fortschritts-Ticker | Anzeige ab 20 s Laufzeit, Aktualisierung alle 10 s |
 
 ## Sicherheit
 
@@ -108,6 +112,9 @@ sudo bash install.sh          # fragt Token, Chat-ID, Hostname, Arbeitsverzeichn
 
 ## Versionen
 
+- **v11** (2026-09-07): Fünf Verbesserungen aus einem Community-Fork, eigenständig umgesetzt. **Schutzzweig**: In Git-Verzeichnissen legt der Bot vor dem ersten Lauf einer Session einen Zweig `bot/<zeit>` an — der Bot legt ihn an, nicht das Modell, damit die Sicherung nicht per Prompt Injection aushebelbar ist; Änderungen werden auf dem Zweig committet, die Antwort nennt Zweig und Diffstat. **Persistente Warteschlange**: wartende Aufträge überleben Neustarts, der Bot fragt per `/fortsetzen`/`/verwerfen` statt still weiterzumachen. **Capability-Ping**: alle 6 h beweist ein Haiku-Mini-Lauf im Leerlauf, dass Claude wirklich antworten kann — ein Prozess-Check bemerkt „Dienst läuft, Login tot" nicht. **Fortschrittsanzeige**: ab 20 s Laufzeit eine still per `editMessageText` fortgeschriebene Nachricht (Edits lösen keine Benachrichtigung aus), Inhalt aus dem wachsenden Live-Transkript. **Kostenzählung** je Session aus `total_cost_usd` in `/status` und `/usage`
+- **v10** (2026-09-07): `/remote-control` (Kurzform `/rc`) führt die aktive Session in der Claude-App bzw. auf claude.ai/code weiter — `claude --resume <id> --remote-control` in tmux, der Bot meldet die App-URL. Einmalig nötig: frischer `claude /login`, der Token braucht den Scope `user:sessions:claude_code`. `/rc aus` beendet, die Session bleibt
+- **v9** (2026-09-07): `/neu <name>` (ein einzelnes namensartiges Wort) legt ein neues Projektverzeichnis an und registriert es; frei formulierte Aufträge hinter `/neu` verhalten sich unverändert
 - **v8** (2026-09-07): Drei Korrekturen aus einem Fork-Review. `is_error` des Result-JSON wird ausgewertet — `claude -p` meldet API-Fehler mit **Exit-Code 0 und `subtype: "success"`**, der Fehlertext landete dadurch als vermeintliche Claude-Antwort im Chat, während der Dienst gesund aussah. **Der Bot-Token wird nicht mehr an den Claude-Subprozess vererbt**; dazu Permission-MCP v3, der seine Anfragen tokenlos über Dateien stellt statt selbst die Telegram-API zu rufen. `standard` nutzt `manual` statt des nicht mehr gelisteten `default`, neuer Modus `auto`
 - **v7** (2026-09-05): `/usage`-Befehl — Kontext-Verbrauch der aktiven Session aus dem Session-Transkript (letzter API-Call, Subagenten ausgefiltert), Kontextfenster wird je Auftrag aus dem Result-JSON gemerkt statt hartcodiert; ab 70 % Hinweis auf `/clear`
 - **v6.1** (2026-09-04): stdin des Claude-Prozesses wird sofort geschlossen (spart 3 Sekunden Wartezeit je Auftrag); Fehlermeldungen zeigen das Ende der Meldung statt des Kommando-Echos — da steht die Ursache

@@ -1,5 +1,8 @@
 #!/usr/bin/env node
-// Session-Bot v11.1: steuert Claude-Code-Sessions auf dem VPS per Telegram.
+// Session-Bot: steuert Claude-Code-Sessions auf dem VPS per Telegram.
+// Die aktuelle Version steht als Konstante VERSION im Code, NICHT hier - die
+// Changelog-Zeilen unten sind Historie, die unterste ist der aktuelle Stand.
+// Beim Start prueft der Bot beides gegeneinander und warnt bei Abweichung.
 // Jede normale Nachricht ist ein Auftrag an die aktive Session.
 // v2: Projektverzeichnis waehlbar. v3: /clear, Web-Zugriff, Freigabe-Buttons. v4: /modus je Session.
 // v5: Button-Klick editiert die Anfrage-Nachricht (ERLAUBT/ABGELEHNT sichtbar), realistische Antwortzeit-Ansagen.
@@ -15,10 +18,25 @@
 //      Kostenzaehlung je Session aus total_cost_usd.
 // v11.1: Sicherheitshaertung - Session-Titel mit fuehrenden -- werden nicht mehr als claude-Flag
 //        geparst (Arg-Injection ueber /rc), PERM_DIR beim Start hart auf 0700.
+// v11.2: Befehle unabhaengig von Gross-/Kleinschreibung (/Status = /status), angehaengtes
+//        @botname wird abgeschnitten. Normalisiert wird nur das erste Wort - Pfade und
+//        Auftragstext bleiben buchstabengetreu.
+// v11.3: eine Versionsnummer statt zwei - VERSION-Konstante ist die einzige Quelle,
+//        Startmeldung und /status leiten ab, Selbstpruefung beim Start meldet Drift
+//        zwischen Konstante und hoechster Changelog-Zeile.
+// v12: Doppeltipp-Haertung - ein zweiter Button-Tipp erzeugt keine verwaiste Antwortdatei
+//      mehr, sondern meldet "Schon beantwortet". Unbekannte Slash-Befehle werden abgefangen
+//      statt als CLI-Kommando an Claude durchgereicht.
 // Hinweis: Der Modus "voll" (bypassPermissions) funktioniert nicht, wenn der Bot als root laeuft - Claude Code verweigert das grundsaetzlich.
 // Befehle: /neu [projekt|/pfad] [Auftrag], /projekte [add name /pfad], /modus [name], /modell [name], /sessions, /wechsel N, /status, /usage, /clear, /ende, /remote-control [aus], /fortsetzen, /verwerfen
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync, chmodSync } from "node:fs";
 import { execFile } from "node:child_process";
+
+// Einzige Stelle mit der aktuellen Versionsnummer. Startmeldung, /status und die
+// Selbstpruefung leiten sich daraus ab. Bei einer neuen Version: hier hochzaehlen
+// UND unten eine Changelog-Zeile ergaenzen - die Pruefung beim Start meldet, wenn
+// nur eines von beidem passiert ist.
+const VERSION = "12";
 
 const TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = Number(process.env.CHAT_ID);
@@ -348,7 +366,24 @@ function pingClaude() {
 setInterval(pingClaude, 15 * 60 * 1000);
 
 let offset = 0;
-console.log(new Date().toISOString(), "Session-Bot v11.1 gestartet");
+// Selbstpruefung: hoechste Changelog-Zeile im eigenen Kopf gegen VERSION halten.
+// Genau diese Drift ist am 07.09. dreimal passiert - Kopfzeile gepflegt, String vergessen.
+// Kostet einen Dateizugriff pro Start und meldet den Fehler, statt ihn im Journal zu verstecken.
+function versionsPruefung() {
+  try {
+    const kopf = readFileSync(new URL(import.meta.url).pathname, "utf8").split("\n").slice(0, 40);
+    const nummern = kopf.map((z) => (z.match(/^\/\/\s*v(\d+(?:\.\d+)?):/) || [])[1]).filter(Boolean);
+    if (!nummern.length) return "keine Changelog-Zeile gefunden";
+    const hoechste = nummern.sort((a, b) => {
+      const [am, an] = String(a).split("."), [bm, bn] = String(b).split(".");
+      return Number(am) - Number(bm) || Number(an || 0) - Number(bn || 0);
+    }).pop();
+    return hoechste === VERSION ? null : `VERSION=${VERSION}, hoechste Changelog-Zeile v${hoechste}`;
+  } catch (e) { return `nicht pruefbar (${(e && e.message) || e})`; }
+}
+const drift = versionsPruefung();
+if (drift) console.error(new Date().toISOString(), "WARNUNG Versions-Drift:", drift);
+console.log(new Date().toISOString(), `Session-Bot v${VERSION} gestartet${drift ? " (Versions-Drift, siehe Warnung)" : ""}`);
 if (wartend.length) {
   await send(`Vom letzten Neustart uebrig: ${wartend.length} wartende(r) Auftrag/Auftraege:\n` + wartend.map((w, i) => `${i + 1}. ${String(w.text).slice(0, 60)}`).join("\n") + "\n\n/fortsetzen fuehrt sie aus, /verwerfen loescht sie.");
 }
@@ -368,6 +403,12 @@ while (true) {
           if (/^[a-z0-9]+$/i.test(id)) {
             try {
               mkdirSync(PERM_DIR, { recursive: true, mode: 0o700 });
+              // v12: Antwort nur schreiben, wenn die Anfrage noch offen ist. Telegram-Lag laesst
+              // die Buttons nach dem ersten Tipp kurz stehen - ein zweiter Tipp erzeugte sonst
+              // eine verwaiste Antwortdatei (die Doppeltipp-Waisen vom 07.09.).
+              const offen = existsSync(`${PERM_DIR}/${id}.req`) && !existsSync(`${PERM_DIR}/${id}.req.expired`);
+              if (!offen) { note = "Schon beantwortet oder abgelaufen"; }
+              else {
               writeFileSync(`${PERM_DIR}/${id}`, antwort, { mode: 0o600 });
               note = antwort === "ja" ? "Erlaubt" : "Abgelehnt";
               permMsg.delete(id); // der MCP raeumt .req selbst weg, sobald er die Antwort liest
@@ -377,6 +418,7 @@ while (true) {
                 await fetch(`${API}/editMessageText`, { method: "POST", headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({ chat_id: CHAT_ID, message_id: cq.message.message_id,
                     text: ((antwort === "ja" ? "ERLAUBT - Claude fuehrt aus:\n" : "ABGELEHNT - Claude ueberspringt:\n") + orig).slice(0, 4000) }) }).catch(() => {});
+              }
               }
             }
             catch (e) { console.error(new Date().toISOString(), "Perm:", (e && e.message) || e); note = "Fehler"; }
@@ -389,7 +431,14 @@ while (true) {
 
       const msg = u.message;
       if (!msg?.text || msg.chat.id !== CHAT_ID) continue;
-      const text = msg.text.trim();
+      // Befehle unabhaengig von Gross- und Kleinschreibung erkennen: /Status, /STATUS und
+      // /status sind dasselbe. Normalisiert wird NUR das erste Wort - der Rest der Nachricht
+      // (Auftrag, Projektname, Pfad) bleibt unangetastet, denn Linux-Pfade sind case-sensitiv
+      // und ein pauschales toLowerCase() wuerde /neu /root/Vault zerschiessen.
+      // Ein angehaengtes @botname wird mit abgeschnitten (kommt beim Kopieren aus Gruppen vor).
+      // Das Kommandowort behaelt dabei seine Laenge, deshalb stimmen alle slice()-Offsets unten.
+      const roh = msg.text.trim();
+      const text = roh.startsWith("/") ? roh.replace(/^\/(\S+)/, (m, w) => "/" + w.split("@")[0].toLowerCase()) : roh;
       const reg = load();
       const cur = reg.sessions.find((s) => s.id === reg.aktiv) || null;
 
@@ -438,7 +487,7 @@ while (true) {
       }
       if (text === "/projekte" || text.startsWith("/projekte ")) {
         const teile = text.split(/\s+/);
-        if (teile[1] === "add" && teile[2] && teile[3]) {
+        if ((teile[1] || "").toLowerCase() === "add" && teile[2] && teile[3]) {
           const name = teile[2].toLowerCase(); const pfad = teile[3];
           if (!existsSync(pfad)) { await send(`Verzeichnis ${pfad} existiert nicht auf dem Server.`); continue; }
           const p = loadProj(); p[name] = pfad; saveProj(p);
@@ -465,10 +514,11 @@ while (true) {
       }
       if (text === "/status") {
         const lage = busy ? `Ein Auftrag laeuft gerade${queue.length ? `, ${queue.length} in Warteschlange` : ""}.` : "Bereit.";
+        const kopfV = `Session-Bot v${VERSION}` + (versionsPruefung() ? " (ACHTUNG Versions-Drift, siehe Journal)" : "");
         if (cur) {
-          await send(`Aktive Session: ${cur.titel}\nVerzeichnis: ${cur.cwd || DEFAULT_CWD}\nModus: ${modusName(cur.modus)}\nModell: ${modellName(cur.modell)}\nZuletzt: ${wann(cur.zuletzt)}${cur.kosten ? ` - Kosten ueber den Bot: $${Number(cur.kosten).toFixed(2)}` : ""}\n${lage}\n\nAm Rechner fortsetzen:\nssh root@${HOST}\ncd "${cur.cwd || DEFAULT_CWD}" && claude --resume ${cur.id}`);
+          await send(`${kopfV}\nAktive Session: ${cur.titel}\nVerzeichnis: ${cur.cwd || DEFAULT_CWD}\nModus: ${modusName(cur.modus)}\nModell: ${modellName(cur.modell)}\nZuletzt: ${wann(cur.zuletzt)}${cur.kosten ? ` - Kosten ueber den Bot: $${Number(cur.kosten).toFixed(2)}` : ""}\n${lage}\n\nAm Rechner fortsetzen:\nssh root@${HOST}\ncd "${cur.cwd || DEFAULT_CWD}" && claude --resume ${cur.id}`);
         } else {
-          await send(`Keine aktive Session. ${lage}`);
+          await send(`${kopfV}\nKeine aktive Session. ${lage}`);
         }
         continue;
       }
@@ -565,6 +615,13 @@ while (true) {
         reg.aktiv = null; reg.naechstesCwd = cwd; save(reg);
         if (auftrag) { queue.push({ text: auftrag, cwd }); saveQueue(); await send(`Neue Session in ${kurz(cwd)} wird eroeffnet, Auftrag laeuft. ${DAUER}`); pump(); }
         else await send(`Alles klar, deine naechste Nachricht eroeffnet eine neue Session in ${kurz(cwd)} (Modus ${modusName(reg.naechsterModus)}).`);
+        continue;
+      }
+      // v12: Unbekannte Slash-Befehle abfangen statt an die CLI durchzureichen - die fuehrt sie
+      // sonst als eigene Kommandos aus (Fund 07.09.: "/model haiku" lief als CLI-Befehl). Pfade wie
+      // /etc/fstab haben einen zweiten Schraegstrich im ersten Wort und laufen weiter als Auftrag.
+      if (/^\/[a-zA-Z][a-zA-Z0-9_-]*(\s|$)/.test(text)) {
+        await send(`Unbekannter Befehl: ${text.split(/\s+/)[0]}` + "\n/start zeigt alle Befehle. Nichts wurde an Claude weitergereicht.");
         continue;
       }
       queue.push({ text, cwd: null });

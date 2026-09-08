@@ -30,9 +30,10 @@ Wichtig: `--resume` liefert je Aufruf eine **neue** Session-ID (Fork) — der Bo
 
 Berechtigungen delegiert Claude Code per `--permission-prompt-tool` an einen Mini-MCP-Server (`permission-mcp.mjs`), der die Anfrage als Telegram-Buttons stellt und bis zu 5 Minuten auf den Klick wartet. **Stolperfalle:** Claude Code bricht MCP-Aufrufe standardmäßig nach ~30 s ab — deshalb setzt der Bot `MCP_TOOL_TIMEOUT=360000`. Ohne diesen Wert läuft jede Freigabe ins Leere.
 
-Zwei Eigenheiten, die man kennen sollte:
+Drei Eigenheiten, die man kennen sollte:
 - Harmlose read-only-Befehle (`uptime`, `ls` …) führt Claude Code ohne Anfrage aus — gewollt, keine Button-Flut
 - Im Modus `edits` (Standard) sind Dateiänderungen bewusst freigegeben; wer jede Änderung bestätigen will, nimmt `/modus standard`
+- **Sandbox-Nuance:** Auch im Modus `standard` laufen Bash-Befehle ohne Button durch, wenn sie nur lesen oder nur ins Arbeitsverzeichnis bzw. `/tmp` schreiben — die Sandbox von Claude Code stuft sie als eigenständig sicher ein. Erst ein Schreibversuch außerhalb löst die Freigabe-Anfrage aus. Dateien im Arbeitsverzeichnis kann Claude per Shell also auch im Modus `standard` ohne Nachfrage ändern; die Datei-Werkzeuge fragen dort weiterhin an (gemessen auf 2.1.260, 07.09.2026)
 
 ## Installation
 

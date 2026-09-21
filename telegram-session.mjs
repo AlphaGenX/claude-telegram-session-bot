@@ -43,6 +43,11 @@
 //      verloren, Lost-Update auf der Registry, Prototypen-Treffer bei MODI/MODELLE/projekte,
 //      slice()-Offsets durch befehl() ersetzt, /start-Hilfe aus BEFEHLE abgeleitet samt
 //      Drift-Selbstpruefung, "/ befehl" mit Leerzeichen wird abgefangen.
+// v15.1: /s zeigt die Hilfe, wie /h. Bewusst auf /start gelegt und nicht auf /status oder
+//        /sessions: /s wird intuitiv getippt, und wer sich vertippt, landet lieber in der
+//        Hilfe als in einer Ausgabe, die er nicht gemeint hat. Dazu: Die Versions-Selbstpruefung
+//        liest den Kopf bis zur ersten import-Zeile statt bis Zeile 40 - der Changelog war
+//        ueber das feste Fenster hinausgewachsen und die Pruefung meldete eine Scheindrift.
 // Befehle: siehe BEFEHLE-Tabelle - /start leitet die Hilfe daraus ab
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync, chmodSync } from "node:fs";
 import { execFile } from "node:child_process";
@@ -51,7 +56,7 @@ import { execFile } from "node:child_process";
 // Selbstpruefung leiten sich daraus ab. Bei einer neuen Version: hier hochzaehlen
 // UND unten eine Changelog-Zeile ergaenzen - die Pruefung beim Start meldet, wenn
 // nur eines von beidem passiert ist.
-const VERSION = "15";
+const VERSION = "15.1";
 
 const TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = Number(process.env.CHAT_ID);
@@ -66,7 +71,7 @@ const PROJEKTE_DIR = "/root/projekte"; // v9: Ablage fuer per /neu angelegte Pro
 const ALIAS = {
   n: "neu", p: "projekte", m: "modus", ml: "modell", ss: "sessions", w: "wechsel",
   st: "status", u: "usage", c: "clear", e: "ende", f: "fortsetzen", v: "verwerfen",
-  rc: "remote-control", h: "start",
+  rc: "remote-control", h: "start", s: "start",
 };
 const ALIAS_HILFE = Object.entries(ALIAS).map(([k, v]) => `/${k} = /${v}`).join(", ");
 
@@ -507,7 +512,13 @@ const ALT_KULANZ = 300;
 // Kostet einen Dateizugriff pro Start und meldet den Fehler, statt ihn im Journal zu verstecken.
 function versionsPruefung() {
   try {
-    const kopf = readFileSync(new URL(import.meta.url).pathname, "utf8").split("\n").slice(0, 40);
+    // v15.1: Das Lesefenster endet an der ersten import-Zeile statt nach festen 40 Zeilen.
+    // Der Changelog-Kopf waechst mit jeder Version - mit v15 lief er ueber die 40 hinaus, und
+    // die Pruefung meldete daraufhin eine Drift, die keine war. Eine Grenze, die mitwaechst,
+    // kann das nicht wieder passieren.
+    const alle = readFileSync(new URL(import.meta.url).pathname, "utf8").split("\n");
+    const ende = alle.findIndex((z) => z.startsWith("import "));
+    const kopf = alle.slice(0, ende > 0 ? ende : 60);
     const nummern = kopf.map((z) => (z.match(/^\/\/\s*v(\d+(?:\.\d+)?):/) || [])[1]).filter(Boolean);
     if (!nummern.length) return "keine Changelog-Zeile gefunden";
     const hoechste = nummern.sort((a, b) => {

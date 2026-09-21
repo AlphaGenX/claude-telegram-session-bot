@@ -256,6 +256,11 @@ rl.on("line", async (line) =&gt; {
 //      verloren, Lost-Update auf der Registry, Prototypen-Treffer bei MODI/MODELLE/projekte,
 //      slice()-Offsets durch befehl() ersetzt, /start-Hilfe aus BEFEHLE abgeleitet samt
 //      Drift-Selbstpruefung, "/ befehl" mit Leerzeichen wird abgefangen.
+// v15.1: /s zeigt die Hilfe, wie /h. Bewusst auf /start gelegt und nicht auf /status oder
+//        /sessions: /s wird intuitiv getippt, und wer sich vertippt, landet lieber in der
+//        Hilfe als in einer Ausgabe, die er nicht gemeint hat. Dazu: Die Versions-Selbstpruefung
+//        liest den Kopf bis zur ersten import-Zeile statt bis Zeile 40 - der Changelog war
+//        ueber das feste Fenster hinausgewachsen und die Pruefung meldete eine Scheindrift.
 // Befehle: siehe BEFEHLE-Tabelle - /start leitet die Hilfe daraus ab
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync, chmodSync } from "node:fs";
 import { execFile } from "node:child_process";
@@ -264,7 +269,7 @@ import { execFile } from "node:child_process";
 // Selbstpruefung leiten sich daraus ab. Bei einer neuen Version: hier hochzaehlen
 // UND unten eine Changelog-Zeile ergaenzen - die Pruefung beim Start meldet, wenn
 // nur eines von beidem passiert ist.
-const VERSION = "15";
+const VERSION = "15.1";
 
 const TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = Number(process.env.CHAT_ID);
@@ -279,7 +284,7 @@ const PROJEKTE_DIR = "/root/projekte"; // v9: Ablage fuer per /neu angelegte Pro
 const ALIAS = {
   n: "neu", p: "projekte", m: "modus", ml: "modell", ss: "sessions", w: "wechsel",
   st: "status", u: "usage", c: "clear", e: "ende", f: "fortsetzen", v: "verwerfen",
-  rc: "remote-control", h: "start",
+  rc: "remote-control", h: "start", s: "start",
 };
 const ALIAS_HILFE = Object.entries(ALIAS).map(([k, v]) =&gt; `/${k} = /${v}`).join(", ");
 
@@ -720,7 +725,13 @@ const ALT_KULANZ = 300;
 // Kostet einen Dateizugriff pro Start und meldet den Fehler, statt ihn im Journal zu verstecken.
 function versionsPruefung() {
   try {
-    const kopf = readFileSync(new URL(import.meta.url).pathname, "utf8").split("\n").slice(0, 40);
+    // v15.1: Das Lesefenster endet an der ersten import-Zeile statt nach festen 40 Zeilen.
+    // Der Changelog-Kopf waechst mit jeder Version - mit v15 lief er ueber die 40 hinaus, und
+    // die Pruefung meldete daraufhin eine Drift, die keine war. Eine Grenze, die mitwaechst,
+    // kann das nicht wieder passieren.
+    const alle = readFileSync(new URL(import.meta.url).pathname, "utf8").split("\n");
+    const ende = alle.findIndex((z) =&gt; z.startsWith("import "));
+    const kopf = alle.slice(0, ende &gt; 0 ? ende : 60);
     const nummern = kopf.map((z) =&gt; (z.match(/^\/\/\s*v(\d+(?:\.\d+)?):/) || [])[1]).filter(Boolean);
     if (!nummern.length) return "keine Changelog-Zeile gefunden";
     const hoechste = nummern.sort((a, b) =&gt; {
@@ -1083,7 +1094,7 @@ journalctl -u telegram-session -f         # Log live</code></pre>
 <h2 id="4-referenz-befehle-modi-parameter">4. Referenz: Befehle, Modi, Parameter</h2>
 <h3 id="telegram-befehle">Telegram-Befehle</h3>
 <table><tr><th>Befehl</th><th>Wirkung</th></tr><tr><td>*(normale Nachricht)*</td><td>Auftrag an die aktive Session; ohne aktive Session wird automatisch eine neue eröffnet</td></tr><tr><td>`/neu [projekt\</td><td>/pfad] [Auftrag]`</td><td>Neue Session, optional in registriertem Projekt oder absolutem Pfad, optional direkt mit Auftrag</td></tr><tr><td><code>/projekte</code></td><td>Registrierte Verzeichnisse anzeigen</td></tr><tr><td><code>/projekte add name /pfad</code></td><td>Verzeichnis unter Kurznamen registrieren</td></tr><tr><td><code>/modus [name]</code></td><td>Berechtigungsmodus anzeigen bzw. für aktive/nächste Session setzen</td></tr><tr><td><code>/modell [name]</code></td><td>Sprachmodell anzeigen bzw. setzen (opus, sonnet, haiku, standard); greift ab dem nächsten Auftrag</td></tr><tr><td><code>/sessions</code></td><td>Alle Sessions mit Verzeichnis, Modus, Modell, letzter Nutzung</td></tr><tr><td><code>/wechsel N</code></td><td>Aktive Session wechseln (Nummer aus /sessions)</td></tr><tr><td><code>/status</code></td><td>Aktive Session, Verzeichnis, Modus, Auslastung, fertiger SSH-Befehl zum Fortsetzen am Rechner</td></tr><tr><td><code>/usage</code></td><td>Kontext-Verbrauch der aktiven Session: Balken, Prozent, Token-Stand und Modell — aus dem Transkript, kostenlos ohne Claude-Lauf</td></tr><tr><td><code>/remote-control</code> bzw. <code>/rc</code> [aus]</td><td>Aktive Session in der Claude-App bzw. auf claude.ai/code weiterführen; <code>aus</code> beendet (seit v10)</td></tr><tr><td><code>/fortsetzen</code> / <code>/verwerfen</code></td><td>Nach einem Neustart wartende Aufträge ausführen oder löschen (seit v11)</td></tr><tr><td><code>/clear</code></td><td>Kontext leeren: Session ablegen, nächste Nachricht startet frisch im selben Verzeichnis</td></tr><tr><td><code>/ende</code></td><td>Aktive Session ablegen (Transkript bleibt unter <code>~/.claude/projects/</code> erhalten)</td></tr></table>
-<p><strong>Kurzbefehle (seit v13):</strong> <code>/n</code> = <code>/neu</code>, <code>/p</code> = <code>/projekte</code>, <code>/m</code> = <code>/modus</code>, <code>/ml</code> = <code>/modell</code>, <code>/ss</code> = <code>/sessions</code>, <code>/w</code> = <code>/wechsel</code>, <code>/st</code> = <code>/status</code>, <code>/u</code> = <code>/usage</code>, <code>/c</code> = <code>/clear</code>, <code>/e</code> = <code>/ende</code>, <code>/f</code> = <code>/fortsetzen</code>, <code>/v</code> = <code>/verwerfen</code>, <code>/rc</code> = <code>/remote-control</code>, <code>/h</code> = <code>/start</code>. Die Expansion passiert an einer einzigen Stelle direkt nach der Groß-/Kleinschreibungs-Normalisierung; in der Befehlskette kommt immer die Langform an. Eigene Kürzel: Eintrag in <code>ALIAS</code> ergänzen — der Hilfetext von <code>/start</code> zieht automatisch nach, weil er aus der Tabelle <code>BEFEHLE</code> erzeugt wird.</p>
+<p><strong>Kurzbefehle (seit v13):</strong> <code>/n</code> = <code>/neu</code>, <code>/p</code> = <code>/projekte</code>, <code>/m</code> = <code>/modus</code>, <code>/ml</code> = <code>/modell</code>, <code>/ss</code> = <code>/sessions</code>, <code>/w</code> = <code>/wechsel</code>, <code>/st</code> = <code>/status</code>, <code>/u</code> = <code>/usage</code>, <code>/c</code> = <code>/clear</code>, <code>/e</code> = <code>/ende</code>, <code>/f</code> = <code>/fortsetzen</code>, <code>/v</code> = <code>/verwerfen</code>, <code>/rc</code> = <code>/remote-control</code>, <code>/h</code> und <code>/s</code> = <code>/start</code>. Die Expansion passiert an einer einzigen Stelle direkt nach der Groß-/Kleinschreibungs-Normalisierung; in der Befehlskette kommt immer die Langform an. Eigene Kürzel: Eintrag in <code>ALIAS</code> ergänzen — der Hilfetext von <code>/start</code> zieht automatisch nach, weil er aus der Tabelle <code>BEFEHLE</code> erzeugt wird.</p>
 <p><code>/neu &lt;name&gt;</code> mit einem einzelnen, noch unbekannten Wort legt das Projektverzeichnis an <strong>und eröffnet die Session sofort</strong> (seit v14). Das kostet einen kurzen Claude-Lauf, dafür ist die Session danach in <code>/status</code> und <code>/usage</code> sichtbar.</p>
 <h3 id="berechtigungsmodi-modus">Berechtigungsmodi (<code>/modus</code>)</h3>
 <table><tr><th>Name</th><th>claude-Wert</th><th>Verhalten</th></tr><tr><td><code>standard</code></td><td><code>manual</code></td><td>Alles außer Lesen fragt per Button an, auch Dateiänderungen. Sandbox-Ausnahme: Bash-Befehle, die nur lesen oder nur ins Arbeitsverzeichnis bzw. <code>/tmp</code> schreiben, laufen ohne Button (siehe Abschnitt 2, Berechtigungslogik)</td></tr><tr><td><code>edits</code></td><td><code>acceptEdits</code></td><td>Dateiänderungen automatisch, Shell &amp; Co. per Button — Standard</td></tr><tr><td><code>plan</code></td><td><code>plan</code></td><td>Nur lesen und planen, ändert nichts</td></tr><tr><td><code>auto</code></td><td><code>auto</code></td><td>Claude entscheidet selbst, wann es nachfragt (seit v8)</td></tr><tr><td><code>voll</code></td><td><code>bypassPermissions</code></td><td>Keine Nachfragen; <strong>funktioniert nicht, wenn der Bot als root läuft</strong> — Claude Code verweigert das grundsätzlich (bestätigt 04.09.2026). Braucht einen unprivilegierten Benutzer</td></tr></table>
@@ -1108,7 +1119,7 @@ journalctl -u telegram-session -f         # Log live</code></pre>
 <li>Antwortzeit einfacher Aufträge: gemessen 13–38 Sekunden (vor v6.1; das sofort geschlossene stdin spart seither weitere ~3 Sekunden); lange Antworten werden auf mehrere Telegram-Nachrichten gesplittet (Limit 4096 Zeichen)</li>
 <li>Je Zeitpunkt läuft genau ein Auftrag; weitere Nachrichten werden eingereiht und danach abgearbeitet</li>
 </ul>
-<footer>Stand 21.09.2026 · Bot v15 · Alle persönlichen Werte sind Platzhalter: &lt;BOT_TOKEN&gt;, &lt;CHAT_ID&gt;, &lt;DEIN-SERVER&gt;</footer>
+<footer>Stand 21.09.2026 · Bot v15.1 · Alle persönlichen Werte sind Platzhalter: &lt;BOT_TOKEN&gt;, &lt;CHAT_ID&gt;, &lt;DEIN-SERVER&gt;</footer>
 </div>
 </body>
 </html>

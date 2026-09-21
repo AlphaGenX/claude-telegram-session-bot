@@ -88,6 +88,11 @@ sudo bash install.sh          # fragt Token, Chat-ID, Hostname, Arbeitsverzeichn
 | `/fortsetzen` / `/verwerfen` | Nach einem Neustart wartende Aufträge ausführen oder löschen |
 | `/clear` | Kontext leeren, frisch im selben Verzeichnis |
 | `/ende` | Session ablegen (Transkript bleibt unter `~/.claude/projects/`) |
+| `/start` bzw. `/h` | Hilfe — wird aus der `BEFEHLE`-Tabelle im Script erzeugt |
+
+**Kurzbefehle** (seit v13): `/n` = `/neu`, `/p` = `/projekte`, `/m` = `/modus`, `/ml` = `/modell`, `/ss` = `/sessions`, `/w` = `/wechsel`, `/st` = `/status`, `/u` = `/usage`, `/c` = `/clear`, `/e` = `/ende`, `/f` = `/fortsetzen`, `/v` = `/verwerfen`, `/rc` = `/remote-control`, `/h` = `/start`. Die Expansion passiert an einer einzigen Stelle direkt nach der Groß-/Kleinschreibungs-Normalisierung — unten in der Befehlskette kommt immer die Langform an. Eigene Kürzel: Eintrag in `ALIAS` ergänzen, der Hilfetext zieht automatisch nach.
+
+`/neu <name>` mit einem einzelnen, noch unbekannten Wort legt das Projektverzeichnis an **und eröffnet die Session sofort** (seit v14) — das kostet einen kurzen Claude-Lauf, dafür ist die Session anschließend in `/status` und `/usage` sichtbar.
 
 ## Stellschrauben
 
@@ -100,6 +105,9 @@ sudo bash install.sh          # fragt Token, Chat-ID, Hostname, Arbeitsverzeichn
 | `permission-mcp.mjs` | `PERM_TIMEOUT_MS` (Env, Standard `300000`) | Wartezeit auf den Button (5 Min), danach abgelehnt |
 | `telegram-session.mjs` | `PERM_DIR` | Austauschverzeichnis zwischen Bot und Permission-MCP (Standard `/root/.perm`) |
 | `claude-projekte.json` | Name → Pfad | Projekt-Kurznamen für `/neu` |
+| `telegram-session.mjs` | `ALIAS` | Kurzbefehle; Hilfetext und Befehlskette ziehen automatisch nach |
+| `telegram-session.mjs` | `BEFEHLE` | Befehlstabelle, aus der `/start` seinen Hilfetext erzeugt |
+| `telegram-session.mjs` | `ALT_KULANZ` (Standard `300`) | Wie alt eine Nachricht beim Start sein darf, bevor sie gemeldet statt ausgeführt wird |
 | `telegram-session.mjs` | `PING_ALLE` | Abstand des Capability-Pings (6 h), erster Lauf 15 min nach Start |
 | `telegram-session.mjs` | `20` und `10000` im Fortschritts-Ticker | Anzeige ab 20 s Laufzeit, Aktualisierung alle 10 s |
 
@@ -113,6 +121,10 @@ sudo bash install.sh          # fragt Token, Chat-ID, Hostname, Arbeitsverzeichn
 
 ## Versionen
 
+- **v15** (2026-09-21): Code-Review-Runde. **Robustheit:** `send()` fängt Netzfehler selbst ab und wiederholt bei `429`/`5xx`; `pump()` läuft in `try/finally`, damit ein Fehler weder den Prozess beendet (eine unbehandelte Rejection tut das seit Node 15) noch `busy` dauerhaft verklemmt. **Keine Doppelausführung mehr:** Der Update-Offset überlebt den Neustart, Nachrichten von vor der Startzeit werden gemeldet statt ausgeführt. **Kein stiller Verlust:** Der gerade laufende Auftrag bleibt in der Warteschlangendatei und wird beim Start als „lief gerade, Ausgang unbekannt" benannt. Dazu behoben: Lost Update auf der Session-Registry (schreibende Handler laden frisch vor `save()`), Treffer aus der Prototypenkette bei `MODI`/`MODELLE`/Projektliste (`Object.hasOwn`), `stdin?.end()` gegen ein hängendes `pump()`. **Umgebaut:** `befehl(text, name)` ersetzt gezählte `slice()`-Offsets, die `BEFEHLE`-Tabelle trägt den `/start`-Hilfetext, und eine zweite Selbstprüfung beim Start hält Tabelle und Handler gegeneinander. `/ befehl` mit Leerzeichen wird abgefangen
+- **v14** (2026-09-21): `/neu <name>` eröffnet die Session sofort — ein kurzer Eröffnungsauftrag erzeugt die Session-ID, statt auf die nächste Nachricht zu warten. Der Sessiontitel ist dabei der Projektname statt der ersten 48 Zeichen des Auftragstexts
+- **v13.1** (2026-09-21): Laufzeitmessung im Journal — je Nachricht der Weg von Telegram zum Bot (aus `msg.date`) und die Zeit bis zur ersten Antwort. Macht die Frage „liegt es am Bot oder am Handy?" messbar statt spekulativ
+- **v13** (2026-09-21): Kurzbefehle über eine feste Alias-Tabelle (`/w` = `/wechsel`, `/ss` = `/sessions`, …). Expandiert wird an genau einer Stelle auf die Langform, die Befehlskette bleibt unberührt; der Hilfetext leitet die Liste aus der Tabelle ab
 - **v12** (2026-09-08): Doppeltipp-Härtung — ein zweiter Tipp auf einen Freigabe-Button erzeugt keine verwaiste Antwortdatei mehr, sondern meldet „Schon beantwortet"; die Antwort wird nur bei noch offener Anfrage geschrieben. Unbekannte Slash-Befehle werden abgefangen und nicht mehr an die CLI durchgereicht (Pfade mit zweitem Schrägstrich laufen weiter als Auftrag)
 - **v11.3** (2026-09-08): eine einzige Versionsnummer als Quelle (Konstante `VERSION`), Startmeldung und `/status` leiten ab; Selbstprüfung beim Start meldet Drift zwischen Konstante und höchster Changelog-Zeile
 - **v11.2** (2026-09-07): Befehle unabhängig von Groß-/Kleinschreibung (`/Status` = `/status`), angehängtes `@botname` wird abgeschnitten — normalisiert wird nur das erste Wort, Pfade und Auftragstext bleiben buchstabengetreu

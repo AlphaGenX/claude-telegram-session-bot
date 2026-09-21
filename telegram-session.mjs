@@ -4,6 +4,7 @@
 // Changelog-Zeilen unten sind Historie, die unterste ist der aktuelle Stand.
 // Beim Start prueft der Bot beides gegeneinander und warnt bei Abweichung.
 // Jede normale Nachricht ist ein Auftrag an die aktive Session.
+// Hinweis: Der Modus "voll" (bypassPermissions) funktioniert nicht, wenn der Bot als root laeuft - Claude Code verweigert das grundsaetzlich.
 // v2: Projektverzeichnis waehlbar. v3: /clear, Web-Zugriff, Freigabe-Buttons. v4: /modus je Session.
 // v5: Button-Klick editiert die Anfrage-Nachricht (ERLAUBT/ABGELEHNT sichtbar), realistische Antwortzeit-Ansagen.
 // v6: /modell-Befehl - Sprachmodell je Session waehlbar (opus, sonnet, haiku, standard).
@@ -27,8 +28,22 @@
 // v12: Doppeltipp-Haertung - ein zweiter Button-Tipp erzeugt keine verwaiste Antwortdatei
 //      mehr, sondern meldet "Schon beantwortet". Unbekannte Slash-Befehle werden abgefangen
 //      statt als CLI-Kommando an Claude durchgereicht.
-// Hinweis: Der Modus "voll" (bypassPermissions) funktioniert nicht, wenn der Bot als root laeuft - Claude Code verweigert das grundsaetzlich.
-// Befehle: /neu [projekt|/pfad] [Auftrag], /projekte [add name /pfad], /modus [name], /modell [name], /sessions, /wechsel N, /status, /usage, /clear, /ende, /remote-control [aus], /fortsetzen, /verwerfen
+// v13: Kurzbefehle - feste Alias-Tabelle (ALIAS), die direkt nach der Gross-/Kleinschreibung
+//      auf den Langbefehl expandiert wird. Die Befehlskette darunter bleibt unveraendert,
+//      deshalb stimmen alle slice()-Offsets weiter: unten kommt immer die Langform an.
+// v13.1: Laufzeitmessung im Journal - je Nachricht der Weg von Telegram zum Bot (aus msg.date)
+//        und die Zeit bis zur ersten Antwort, dazu die reine Dauer des sendMessage-Aufrufs.
+// v14: /neu <name> eroeffnet die Session sofort - ein kurzer Eroeffnungsauftrag erzeugt die
+//      Session-ID, statt auf die naechste Nachricht zu warten. Der Sessiontitel ist dabei der
+//      Projektname, nicht der Auftragstext.
+// v15: Code-Review-Runde. Behoben: SSH-Hinweis in /status kommt aus der HOST-Konstante,
+//      send() und pump() koennen den Prozess nicht mehr ueber eine unbehandelte Rejection
+//      beenden (try/finally plus Wiederholversuch), Update-Offset ueberlebt den Neustart
+//      (keine Doppelausfuehrung), laufender Auftrag geht beim Neustart nicht mehr still
+//      verloren, Lost-Update auf der Registry, Prototypen-Treffer bei MODI/MODELLE/projekte,
+//      slice()-Offsets durch befehl() ersetzt, /start-Hilfe aus BEFEHLE abgeleitet samt
+//      Drift-Selbstpruefung, "/ befehl" mit Leerzeichen wird abgefangen.
+// Befehle: siehe BEFEHLE-Tabelle - /start leitet die Hilfe daraus ab
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync, chmodSync } from "node:fs";
 import { execFile } from "node:child_process";
 
@@ -36,7 +51,7 @@ import { execFile } from "node:child_process";
 // Selbstpruefung leiten sich daraus ab. Bei einer neuen Version: hier hochzaehlen
 // UND unten eine Changelog-Zeile ergaenzen - die Pruefung beim Start meldet, wenn
 // nur eines von beidem passiert ist.
-const VERSION = "12";
+const VERSION = "15";
 
 const TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = Number(process.env.CHAT_ID);
@@ -44,12 +59,58 @@ const API = `https://api.telegram.org/bot${TOKEN}`;
 const REG = "/root/.claude-sessions.json";
 const PROJ = "/root/.config/claude-projekte.json";
 const PROJEKTE_DIR = "/root/projekte"; // v9: Ablage fuer per /neu angelegte Projekte
+
+// v13: Kurzbefehle. Schluessel ohne Slash, Wert ist der Langbefehl. Expandiert wird an genau
+// einer Stelle (Normalisierung des ersten Wortes, siehe unten) - die Befehlskette kennt nur
+// die Langform. Neue Kurzform: hier eintragen, der Hilfetext von /start zieht automatisch nach.
+const ALIAS = {
+  n: "neu", p: "projekte", m: "modus", ml: "modell", ss: "sessions", w: "wechsel",
+  st: "status", u: "usage", c: "clear", e: "ende", f: "fortsetzen", v: "verwerfen",
+  rc: "remote-control", h: "start",
+};
+const ALIAS_HILFE = Object.entries(ALIAS).map(([k, v]) => `/${k} = /${v}`).join(", ");
+
+// v15: Eine Tabelle als Quelle fuer den Hilfetext. Vorher war die /start-Ausgabe eine von Hand
+// gepflegte Kopie der Befehlskette - dieselbe Sorte doppelte Wahrheit, die v11.3 bei der
+// Versionsnummer beseitigt hat. Die Selbstpruefung beim Start haelt Tabelle und Handler gegeneinander.
+const BEFEHLE = [
+  { name: "neu", arg: "[projekt|/pfad] [Auftrag]", hilfe: "neue Session; ein einzelnes neues Wort legt das Projekt an und eroeffnet sofort" },
+  { name: "projekte", arg: "[add name /pfad]", hilfe: "Verzeichnisse zeigen, mit add registrieren" },
+  { name: "modus", arg: "[standard|edits|plan|auto|voll]", hilfe: "Berechtigungsmodus je Session" },
+  { name: "modell", arg: "[opus|sonnet|haiku|standard]", hilfe: "Sprachmodell je Session" },
+  { name: "sessions", arg: "", hilfe: "alle Sessions" },
+  { name: "wechsel", arg: "N", hilfe: "Session wechseln" },
+  { name: "status", arg: "", hilfe: "Stand plus SSH-Befehl zum Fortsetzen am Rechner" },
+  { name: "usage", arg: "", hilfe: "Kontext-Verbrauch der aktiven Session" },
+  { name: "clear", arg: "", hilfe: "Kontext leeren, frisch im selben Verzeichnis" },
+  { name: "ende", arg: "", hilfe: "aktive Session ablegen" },
+  { name: "remote-control", arg: "[aus]", hilfe: "Session in der Claude-App weiterfuehren" },
+  { name: "fortsetzen", arg: "", hilfe: "nach einem Neustart wartende Auftraege starten" },
+  { name: "verwerfen", arg: "", hilfe: "wartende Auftraege loeschen" },
+  { name: "start", arg: "", hilfe: "diese Hilfe" },
+];
+const HILFE_LISTE = BEFEHLE.map((b) => `/${b.name}${b.arg ? " " + b.arg : ""} - ${b.hilfe}`).join("\n");
+
+// v15: Loest die slice()-Offsets ab. Vorher stand an jeder Aufrufstelle eine gezaehlte Zahl
+// (text.slice(6) fuer /modus, slice(15) fuer /remote-control) - eine Umbenennung haette das
+// Argument-Parsing still zerschossen. Rueckgabe: das Argument, "" ohne Argument, null wenn
+// der Text diesen Befehl nicht meint.
+function befehl(text, name) {
+  const pre = "/" + name;
+  if (text === pre) return "";
+  if (text.startsWith(pre + " ")) return text.slice(pre.length + 1).trim();
+  return null;
+}
+// v15: Lookup ohne Treffer aus der Prototypenkette. Vorher lief "/modus constructor" in den
+// Erfolgszweig, weil MODI["constructor"] die Object-Funktion lieferte.
+const ausTabelle = (obj, schluessel) => (Object.hasOwn(obj, schluessel) ? obj[schluessel] : undefined);
 const PERM_DIR = "/root/.perm";
 const DEFAULT_CWD = "/root/vault";
 const DEFAULT_MODE = "acceptEdits";
 const PROJECTS = "/root/.claude/projects";
 const FENSTER_FALLBACK = 200000; // solange kein Lauf das echte Kontextfenster gemeldet hat
 const CLAUDE = "/root/.local/bin/claude";
+// Eigene Serveradresse eintragen - sie erscheint im SSH-Hinweis von /status.
 const HOST = "<DEIN-SERVER>";
 // v8-Fix 3: BOT_TOKEN und CHAT_ID NICHT an den Claude-Subprozess weiterreichen. Sonst kann ein
 // per Prompt Injection gekaperter Lauf (siehe Sicherheitshinweis in der Projektnotiz) den Token
@@ -108,12 +169,49 @@ function kontextStand(sessionId) {
 }
 const DAUER = "Antwort kommt meist unter einer Minute, groessere Auftraege brauchen laenger.";
 
+// v13.1: Laufzeitmessung. antwortMessung haelt den Eingangszeitpunkt der zuletzt empfangenen
+// Nachricht, die erste Antwort danach protokolliert die Spanne. Zusammen mit dem Weg-Wert im
+// Eingangslog zeigt das, ob Sekunden vor dem Bot entstehen (Handy, Telegram, Netz) oder in ihm.
+let antwortMessung = null;
+
+// v15: Ein Teilstueck senden, mit Wiederholung und ohne je zu werfen. Das fetch hier scheitert
+// im Betrieb gelegentlich (im Journal als "Loop: fetch failed" sichtbar). Ungeschuetzt aus
+// pump() heraus haette diese Rejection den Prozess beendet - Node beendet seit v15 bei einer
+// unbehandelten Rejection -, der laufende Auftrag waere still verloren und die Antwort nie
+// angekommen. Deshalb faengt send() alles selbst ab und meldet den Fehlschlag nur ins Journal.
+async function sendeTeil(text, versuche = 3) {
+  for (let v = 1; v <= versuche; v++) {
+    try {
+      const r = await fetch(`${API}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: CHAT_ID, text }) });
+      if (r.ok) return true;
+      // Nur Ueberlast und Serverfehler sind einen zweiten Versuch wert. Ein 400 bleibt ein 400.
+      if (r.status !== 429 && r.status < 500) {
+        console.error(new Date().toISOString(), "sendMessage abgelehnt, HTTP", r.status);
+        return false;
+      }
+      console.error(new Date().toISOString(), `sendMessage HTTP ${r.status}, Versuch ${v} von ${versuche}`);
+    } catch (e) {
+      console.error(new Date().toISOString(), `sendMessage Versuch ${v} von ${versuche}:`, (e && e.message) || e);
+    }
+    if (v < versuche) await new Promise((r) => setTimeout(r, 1000 * v));
+  }
+  return false;
+}
+
 async function send(text) {
   let s = String(text ?? "").trim() || "(leere Antwort)";
   if (s.length > 15200) s = s.slice(0, 15200) + "\n[gekuerzt]";
+  const tSend = Date.now();
   for (let i = 0; i < s.length; i += 3800) {
-    await fetch(`${API}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: CHAT_ID, text: s.slice(i, i + 3800) }) });
+    if (!(await sendeTeil(s.slice(i, i + 3800)))) break;
+  }
+  const api = ((Date.now() - tSend) / 1000).toFixed(2);
+  if (antwortMessung !== null) {
+    console.log(new Date().toISOString(), `Antwort nach ${((Date.now() - antwortMessung) / 1000).toFixed(2)}s (davon Telegram-API ${api}s)`);
+    antwortMessung = null;
+  } else if (Number(api) > 2) {
+    console.log(new Date().toISOString(), `sendMessage langsam: ${api}s`);
   }
 }
 
@@ -150,7 +248,7 @@ function fortschrittText(pfad) {
   try {
     const zeilen = readFileSync(pfad, "utf8").trim().split("\n");
     for (let i = zeilen.length - 1; i >= 0; i--) {
-      if (!zeilen[i].includes(String.fromCharCode(34) + "assistant" + String.fromCharCode(34))) continue;
+      if (!zeilen[i].includes('"assistant"')) continue;
       let j; try { j = JSON.parse(zeilen[i]); } catch { continue; }
       if (j.type !== "assistant" || j.isSidechain) continue;
       for (const b of [...(j.message?.content || [])].reverse()) {
@@ -281,7 +379,10 @@ function runClaude(auftrag, resumeId, cwd, modus, modell) {
         resolve({ ok: false, error: "Antwort nicht lesbar: " + String(out).slice(0, 300) });
       }
     });
-    kind.stdin.end(); // sonst wartet Claude 3 Sekunden auf stdin
+    // v15: Optional Chaining - scheitert execFile frueh (fehlende Binary, Fork-Fehler), ist
+    // kind.stdin null. Der TypeError flog dann, bevor die Promise je aufgeloest wurde, und
+    // pump() haette ewig gewartet.
+    kind.stdin?.end(); // sonst wartet Claude 3 Sekunden auf stdin
   });
 }
 
@@ -291,13 +392,25 @@ let busy = false;
 // /fortsetzen fuehrt sie aus, /verwerfen loescht sie - nie stillschweigend weiterlaufen.
 const QDATEI = "/root/.claude-queue.json";
 let wartend = [];
-const saveQueue = () => { try { writeFileSync(QDATEI, JSON.stringify([...queue, ...wartend]), { mode: 0o600 }); } catch {} };
+// v15: Der Auftrag in Arbeit wird mitgeschrieben. Vorher nahm queue.shift() ihn aus der Liste
+// und saveQueue() strich ihn damit aus der Datei - stirbt der Prozess waehrend des Laufs,
+// war der Auftrag spurlos weg, obwohl die Warteschlange ausdruecklich dafuer gebaut wurde,
+// dass nichts stillschweigend verschwindet.
+let laufend = null;
+const saveQueue = () => {
+  try {
+    const alles = [...(laufend ? [{ ...laufend, warInArbeit: true }] : []), ...queue, ...wartend];
+    writeFileSync(QDATEI, JSON.stringify(alles), { mode: 0o600 });
+  } catch {}
+};
 try { if (existsSync(QDATEI)) { wartend = JSON.parse(readFileSync(QDATEI, "utf8")) || []; } } catch {}
 async function pump() {
   if (busy) return;
   busy = true;
+  try {
   while (queue.length) {
     const item = queue.shift();
+    laufend = item;
     saveQueue();
     const reg = load();
     const cur = reg.sessions.find((s) => s.id === reg.aktiv) || null;
@@ -333,7 +446,7 @@ async function pump() {
       if (s) { s.id = r.sid || s.id; s.zuletzt = Date.now(); if (r.fenster) s.fenster = r.fenster; s.kosten = (s.kosten || 0) + (r.kosten || 0); if (zweig) s.zweig = zweig; }
       if (reg2.aktiv === cur.id) reg2.aktiv = r.sid || cur.id;
     } else if (r.sid && !reg2.sessions.some((x) => x.id === r.sid)) {
-      reg2.sessions.push({ id: r.sid, titel: item.text.slice(0, 48), cwd, modus, modell, fenster: r.fenster || null, kosten: r.kosten || 0, zweig: zweig || null, erstellt: Date.now(), zuletzt: Date.now() });
+      reg2.sessions.push({ id: r.sid, titel: item.titel || item.text.slice(0, 48), cwd, modus, modell, fenster: r.fenster || null, kosten: r.kosten || 0, zweig: zweig || null, erstellt: Date.now(), zuletzt: Date.now() });
       if (reg2.sessions.length > 15) reg2.sessions = reg2.sessions.slice(-15);
       if (!reg2.aktiv) reg2.aktiv = r.sid;
       reg2.naechstesCwd = null;
@@ -343,7 +456,16 @@ async function pump() {
     save(reg2);
     await send(r.result + zweigInfo);
   }
-  busy = false;
+  } catch (e) {
+    // v15: Ein Fehler hier darf weder den Prozess beenden noch busy verklemmen. Ohne das
+    // finally blieb busy auf true und der Bot nahm nie wieder einen Auftrag an.
+    console.error(new Date().toISOString(), "pump:", (e && e.stack) || e);
+    await send("Interner Fehler bei der Auftragsverarbeitung: " + String((e && e.message) || e).slice(0, 300));
+  } finally {
+    laufend = null;
+    busy = false;
+    saveQueue();
+  }
 }
 
 // v11: Capability-Ping - im Leerlauf beweist ein Mini-Lauf, dass Claude wirklich antworten
@@ -365,7 +487,21 @@ function pingClaude() {
 }
 setInterval(pingClaude, 15 * 60 * 1000);
 
+// v15: Der Update-Offset ueberlebt jetzt den Neustart. Vorher stand hier fest 0 - Telegram
+// liefert dann alle unbestaetigten Updates der letzten 24 Stunden erneut, und bestaetigt wird
+// immer erst mit dem naechsten getUpdates. Starb der Bot zwischen Verarbeitung und Bestaetigung,
+// lief derselbe Auftrag ein zweites Mal. Bei einem Schreibauftrag im Modus edits waere das
+// nichts, was man zweimal haben moechte.
+const ODATEI = "/root/.claude-offset.json";
 let offset = 0;
+try { offset = Number(JSON.parse(readFileSync(ODATEI, "utf8")).offset) || 0; } catch {}
+const saveOffset = () => { try { writeFileSync(ODATEI, JSON.stringify({ offset }), { mode: 0o600 }); } catch {} };
+// Zweite Schranke fuer den Fall, dass die Offset-Datei fehlt: Auftraege, die deutlich vor dem
+// Start liegen, laufen nicht ungefragt los. Die Kulanz von fuenf Minuten deckt den normalen
+// Neustart ab, bei dem eine gerade abgeschickte Nachricht noch ankommen soll.
+const START_ZEIT = Math.floor(Date.now() / 1000);
+const ALT_KULANZ = 300;
+
 // Selbstpruefung: hoechste Changelog-Zeile im eigenen Kopf gegen VERSION halten.
 // Genau diese Drift ist am 07.09. dreimal passiert - Kopfzeile gepflegt, String vergessen.
 // Kostet einen Dateizugriff pro Start und meldet den Fehler, statt ihn im Journal zu verstecken.
@@ -381,11 +517,36 @@ function versionsPruefung() {
     return hoechste === VERSION ? null : `VERSION=${VERSION}, hoechste Changelog-Zeile v${hoechste}`;
   } catch (e) { return `nicht pruefbar (${(e && e.message) || e})`; }
 }
+// v15: Dieselbe Idee fuer die Befehlstabelle. Der Bot liest seinen eigenen Quelltext und haelt
+// die befehl()-Aufrufe gegen BEFEHLE: ein Handler ohne Tabelleneintrag fehlt in der Hilfe,
+// ein Eintrag ohne Handler ist eine Luege im Hilfetext. Beides faellt sonst erst am Handy auf.
+function befehlsPruefung() {
+  try {
+    const src = readFileSync(new URL(import.meta.url).pathname, "utf8");
+    const gefunden = new Set();
+    for (const m of src.matchAll(/befehl\(text, "([a-z-]+)"\)/g)) gefunden.add(m[1]);
+    const tabelle = new Set(BEFEHLE.map((b) => b.name));
+    const ohneEintrag = [...gefunden].filter((n) => !tabelle.has(n));
+    const ohneHandler = [...tabelle].filter((n) => !gefunden.has(n));
+    if (!ohneEintrag.length && !ohneHandler.length) return null;
+    return [ohneEintrag.length ? "Handler ohne Tabelleneintrag: " + ohneEintrag.join(", ") : "",
+      ohneHandler.length ? "Tabelleneintrag ohne Handler: " + ohneHandler.join(", ") : ""].filter(Boolean).join("; ");
+  } catch (e) { return `nicht pruefbar (${(e && e.message) || e})`; }
+}
+
 const drift = versionsPruefung();
 if (drift) console.error(new Date().toISOString(), "WARNUNG Versions-Drift:", drift);
-console.log(new Date().toISOString(), `Session-Bot v${VERSION} gestartet${drift ? " (Versions-Drift, siehe Warnung)" : ""}`);
+const befehlsDrift = befehlsPruefung();
+if (befehlsDrift) console.error(new Date().toISOString(), "WARNUNG Befehls-Drift:", befehlsDrift);
+console.log(new Date().toISOString(), `Session-Bot v${VERSION} gestartet${drift ? " (Versions-Drift, siehe Warnung)" : ""}${befehlsDrift ? " (Befehls-Drift, siehe Warnung)" : ""}`);
 if (wartend.length) {
-  await send(`Vom letzten Neustart uebrig: ${wartend.length} wartende(r) Auftrag/Auftraege:\n` + wartend.map((w, i) => `${i + 1}. ${String(w.text).slice(0, 60)}`).join("\n") + "\n\n/fortsetzen fuehrt sie aus, /verwerfen loescht sie.");
+  // v15: Ein Auftrag, der beim Abbruch gerade lief, wird als solcher benannt - er ist
+  // moeglicherweise schon ausgefuehrt worden, und das muss man wissen, bevor man ihn wiederholt.
+  const zeilen = wartend.map((w, i) => `${i + 1}. ${String(w.text).slice(0, 60)}${w.warInArbeit ? "  (lief gerade, Ausgang unbekannt)" : ""}`);
+  const warLaufend = wartend.some((w) => w.warInArbeit);
+  await send(`Vom letzten Neustart uebrig: ${wartend.length} wartende(r) Auftrag/Auftraege:\n` + zeilen.join("\n")
+    + (warLaufend ? "\n\nAchtung: Der markierte Auftrag war beim Abbruch in Arbeit. Ob er durchlief, steht nicht fest - pruef das Ergebnis, bevor du ihn wiederholst." : "")
+    + "\n\n/fortsetzen fuehrt sie aus, /verwerfen loescht sie.");
 }
 while (true) {
   try {
@@ -393,6 +554,7 @@ while (true) {
     const data = await res.json();
     for (const u of data.result ?? []) {
       offset = u.update_id + 1;
+      saveOffset();
 
       if (u.callback_query) {
         const cq = u.callback_query;
@@ -431,61 +593,90 @@ while (true) {
 
       const msg = u.message;
       if (!msg?.text || msg.chat.id !== CHAT_ID) continue;
+      // v15: Nachzuegler aus der Zeit vor dem Start nicht stillschweigend ausfuehren.
+      if (msg.date && msg.date < START_ZEIT - ALT_KULANZ) {
+        console.log(new Date().toISOString(), "Altes Update uebersprungen, Alter", Math.round((START_ZEIT - msg.date) / 60), "min");
+        await send(`Uebersprungen: eine Nachricht von ${wann(msg.date * 1000)} lag noch vor dem letzten Neustart. Wenn sie noch gilt, schick sie einfach neu.`);
+        continue;
+      }
       // Befehle unabhaengig von Gross- und Kleinschreibung erkennen: /Status, /STATUS und
       // /status sind dasselbe. Normalisiert wird NUR das erste Wort - der Rest der Nachricht
       // (Auftrag, Projektname, Pfad) bleibt unangetastet, denn Linux-Pfade sind case-sensitiv
       // und ein pauschales toLowerCase() wuerde /neu /root/Vault zerschiessen.
       // Ein angehaengtes @botname wird mit abgeschnitten (kommt beim Kopieren aus Gruppen vor).
-      // Das Kommandowort behaelt dabei seine Laenge, deshalb stimmen alle slice()-Offsets unten.
+      // Das Kommandowort wird anschliessend ueber ALIAS auf die Langform expandiert (v13):
+      // /w wird zu /wechsel, bevor die Befehlskette laeuft. Unten kommt also immer die Langform
+      // an, deshalb stimmen alle slice()-Offsets weiter.
       const roh = msg.text.trim();
-      const text = roh.startsWith("/") ? roh.replace(/^\/(\S+)/, (m, w) => "/" + w.split("@")[0].toLowerCase()) : roh;
+      const text = roh.startsWith("/") ? roh.replace(/^\/(\S+)/, (m, w) => {
+        const kopf = w.split("@")[0].toLowerCase();
+        // Object.hasOwn statt ALIAS[kopf]: sonst traefe /constructor oder /__proto__ die
+        // Prototypenkette und das Kommandowort wuerde zu Unsinn expandieren.
+        return "/" + (Object.hasOwn(ALIAS, kopf) ? ALIAS[kopf] : kopf);
+      }) : roh;
+      // v13.1: Eingang protokollieren. msg.date ist die Telegram-Sendezeit in Sekunden, die
+      // Differenz zeigt den Weg Handy -> Telegram -> Bot. Geloggt wird nur das erste Wort,
+      // der Nachrichtentext hat im Journal nichts verloren.
+      const tEin = Date.now();
+      const weg = msg.date ? ((tEin - msg.date * 1000) / 1000).toFixed(1) : "?";
+      antwortMessung = tEin;
+      console.log(new Date().toISOString(), `Eingang ${text.split(" ")[0].slice(0, 40)} Weg ${weg}s`);
       const reg = load();
       const cur = reg.sessions.find((s) => s.id === reg.aktiv) || null;
 
-      if (text === "/start") {
-        await send("Session-Bot bereit. Jede Nachricht ist ein Auftrag an die aktive Claude-Session. Befehle:\n/neu [projekt] [Auftrag] - neue Session, Verzeichnis waehlbar\n/projekte - Verzeichnisse zeigen, mit add registrieren\n/modus [standard|edits|plan|voll] - Berechtigungsmodus je Session\n/modell [opus|sonnet|haiku|standard] - Sprachmodell je Session\n/sessions - alle Sessions\n/wechsel N - Session wechseln\n/status - Stand plus SSH-Befehl zum Fortsetzen am Rechner\n/usage - Kontext-Verbrauch der aktiven Session\n/clear - Kontext leeren, frisch im selben Verzeichnis\n/ende - aktive Session ablegen\n/remote-control bzw. /rc - Session in der Claude-App weiterfuehren, /rc aus beendet\n/fortsetzen, /verwerfen - nach einem Neustart wartende Auftraege starten oder loeschen\nWeb-Suche ist erlaubt. Braucht Claude weitere Rechte, kommt eine Freigabe-Anfrage mit Buttons (5 Minuten Zeit, dein Klick wird direkt in der Nachricht bestaetigt). " + DAUER);
+      if (befehl(text, "start") !== null) {
+        await send("Session-Bot bereit. Jede Nachricht ist ein Auftrag an die aktive Claude-Session.\n\nBefehle:\n"
+          + HILFE_LISTE
+          + "\n\nKurzbefehle: " + ALIAS_HILFE
+          + "\n\nWeb-Suche ist erlaubt. Braucht Claude weitere Rechte, kommt eine Freigabe-Anfrage mit Buttons (5 Minuten Zeit, dein Klick wird direkt in der Nachricht bestaetigt).\n" + DAUER);
         continue;
       }
-      if (text === "/modus" || text.startsWith("/modus ")) {
-        const arg = text.slice(6).trim().toLowerCase();
+      if (befehl(text, "modus") !== null) {
+        const arg = befehl(text, "modus").toLowerCase();
         if (!arg) {
           await send(`Aktueller Modus${cur ? ` der Session "${cur.titel}"` : " fuer die naechste Session"}: ${cur ? modusName(cur.modus) : modusName(reg.naechsterModus)}\n\nVerfuegbar:\nstandard - alles ausser Lesen fragt per Button an, auch Dateiaenderungen\nedits - Dateiaenderungen automatisch, Rest per Button (Standard)\nplan - nur lesen und planen, aendert nichts\nauto - Claude entscheidet selbst, wann es fragt\nvoll - keine Nachfragen (Vorsicht; funktioniert nicht, wenn der Bot als root laeuft)`);
-        } else if (!MODI[arg]) {
-          await send("Unbekannter Modus. Verfuegbar: standard, edits, plan, auto, voll");
+        } else if (!ausTabelle(MODI, arg)) {
+          await send("Unbekannter Modus. Verfuegbar: " + Object.keys(MODI).join(", "));
         } else {
           if (cur) {
-            const s = reg.sessions.find((x) => x.id === cur.id);
-            if (s) s.modus = MODI[arg];
-            save(reg);
+            // v15: Frisch laden statt auf dem reg von oben zu arbeiten - ein parallel laufender
+            // Auftrag speichert die Registry sonst nach uns und die Einstellung ist still weg.
+            const frisch = load();
+            const s = frisch.sessions.find((x) => x.id === cur.id);
+            if (s) s.modus = ausTabelle(MODI, arg);
+            save(frisch);
             await send(`Modus fuer "${cur.titel}": ${arg}${arg === "voll" ? "\nVorsicht: Claude fragt in dieser Session nichts mehr an. Laeuft der Bot als root, verweigert Claude Code diesen Modus komplett." : ""}`);
           } else {
-            reg.naechsterModus = MODI[arg]; save(reg);
+            const frisch = load();
+            frisch.naechsterModus = ausTabelle(MODI, arg); save(frisch);
             await send(`Modus fuer die naechste Session: ${arg}${arg === "voll" ? "\nVorsicht: Claude fragt in dieser Session nichts mehr an. Laeuft der Bot als root, verweigert Claude Code diesen Modus komplett." : ""}`);
           }
         }
         continue;
       }
-      if (text === "/modell" || text.startsWith("/modell ")) {
-        const arg = text.slice(7).trim().toLowerCase();
+      if (befehl(text, "modell") !== null) {
+        const arg = befehl(text, "modell").toLowerCase();
         if (!arg) {
           await send(`Aktuelles Modell${cur ? ` der Session "${cur.titel}"` : " fuer die naechste Session"}: ${cur ? modellName(cur.modell) : modellName(reg.naechstesModell)}\n\nVerfuegbar:\nopus - staerkstes Modell, fuer Bauauftraege\nsonnet - schnell und guenstig, fuer Erfassung\nhaiku - am schnellsten, fuer kurze Handgriffe\nstandard - keine Vorgabe`);
-        } else if (arg !== "standard" && !MODELLE[arg]) {
-          await send("Unbekanntes Modell. Verfuegbar: opus, sonnet, haiku, standard");
+        } else if (arg !== "standard" && !ausTabelle(MODELLE, arg)) {
+          await send("Unbekanntes Modell. Verfuegbar: " + Object.keys(MODELLE).join(", ") + ", standard");
         } else {
-          const wert = arg === "standard" ? null : MODELLE[arg];
+          const wert = arg === "standard" ? null : ausTabelle(MODELLE, arg);
           if (cur) {
-            const s = reg.sessions.find((x) => x.id === cur.id);
+            const frisch = load();
+            const s = frisch.sessions.find((x) => x.id === cur.id);
             if (s) s.modell = wert;
-            save(reg);
+            save(frisch);
             await send(`Modell fuer "${cur.titel}": ${arg}`);
           } else {
-            reg.naechstesModell = wert; save(reg);
+            const frisch = load();
+            frisch.naechstesModell = wert; save(frisch);
             await send(`Modell fuer die naechste Session: ${arg}`);
           }
         }
         continue;
       }
-      if (text === "/projekte" || text.startsWith("/projekte ")) {
+      if (befehl(text, "projekte") !== null) {
         const teile = text.split(/\s+/);
         if ((teile[1] || "").toLowerCase() === "add" && teile[2] && teile[3]) {
           const name = teile[2].toLowerCase(); const pfad = teile[3];
@@ -498,21 +689,24 @@ while (true) {
         }
         continue;
       }
-      if (text === "/sessions") {
+      if (befehl(text, "sessions") !== null) {
         if (!reg.sessions.length) { await send("Keine Sessions. Schick einfach einen Auftrag oder /neu."); continue; }
         const zeilen = reg.sessions.map((s, i) => `${i + 1}. ${s.titel} [${kurz(s.cwd)}, ${modusName(s.modus)}, ${modellName(s.modell)}] - zuletzt ${wann(s.zuletzt)}${s.id === reg.aktiv ? " (aktiv)" : ""}`);
         await send(zeilen.join("\n") + "\nWechseln mit /wechsel N");
         continue;
       }
-      if (text.startsWith("/wechsel")) {
-        const n = parseInt(text.split(/\s+/)[1], 10);
+      if (befehl(text, "wechsel") !== null) {
+        // v15: Vorher fing startsWith("/wechsel") auch /wechselirgendwas ab. befehl() verlangt
+        // den Befehl exakt oder mit folgendem Leerzeichen.
+        const n = parseInt(befehl(text, "wechsel"), 10);
         const ziel = reg.sessions[n - 1];
         if (!ziel) { await send("Unbekannte Nummer. /sessions zeigt die Liste."); continue; }
-        reg.aktiv = ziel.id; save(reg);
+        const frisch = load();
+        frisch.aktiv = ziel.id; save(frisch);
         await send(`Aktiv: ${ziel.titel} [${kurz(ziel.cwd)}, ${modusName(ziel.modus)}, ${modellName(ziel.modell)}]`);
         continue;
       }
-      if (text === "/status") {
+      if (befehl(text, "status") !== null) {
         const lage = busy ? `Ein Auftrag laeuft gerade${queue.length ? `, ${queue.length} in Warteschlange` : ""}.` : "Bereit.";
         const kopfV = `Session-Bot v${VERSION}` + (versionsPruefung() ? " (ACHTUNG Versions-Drift, siehe Journal)" : "");
         if (cur) {
@@ -522,7 +716,7 @@ while (true) {
         }
         continue;
       }
-      if (text === "/usage") {
+      if (befehl(text, "usage") !== null) {
         if (!cur) { await send("Keine aktive Session. Schick einen Auftrag oder /neu."); continue; }
         const k = kontextStand(cur.id);
         if (!k) { await send(`Kein Transkript zur Session "${cur.titel}" gefunden - vermutlich lief noch kein Auftrag durch.`); continue; }
@@ -532,34 +726,37 @@ while (true) {
         await send(`Kontext der Session "${cur.titel}":\n[${balken}] ${prozent} %\n${tsd(k.kontext)} von ${tsd(fenster)} Token${cur.fenster ? "" : " (Fenster geschaetzt, nach dem naechsten Auftrag exakt)"}\nModell: ${k.modell || modellName(cur.modell)}${cur.kosten ? `\nKosten ueber den Bot: $${Number(cur.kosten).toFixed(2)}` : ""}${prozent >= 70 ? "\n\nWird es eng: /clear leert den Kontext, das Verzeichnis bleibt." : ""}`);
         continue;
       }
-      if (text === "/clear") {
+      if (befehl(text, "clear") !== null) {
         if (!cur) { await send("Keine aktive Session. /neu startet frisch."); continue; }
-        reg.sessions = reg.sessions.filter((s) => s.id !== cur.id);
-        reg.aktiv = null; reg.naechstesCwd = cur.cwd || DEFAULT_CWD; reg.naechsterModus = cur.modus || null; reg.naechstesModell = cur.modell || null; save(reg);
+        const frisch = load();
+        frisch.sessions = frisch.sessions.filter((s) => s.id !== cur.id);
+        frisch.aktiv = null; frisch.naechstesCwd = cur.cwd || DEFAULT_CWD; frisch.naechsterModus = cur.modus || null; frisch.naechstesModell = cur.modell || null; save(frisch);
         await send(`Kontext geleert. Deine naechste Nachricht startet frisch in ${kurz(cur.cwd)} (Modus ${modusName(cur.modus)}).`);
         continue;
       }
-      if (text === "/ende") {
+      if (befehl(text, "ende") !== null) {
         if (!cur) { await send("Keine aktive Session."); continue; }
-        reg.sessions = reg.sessions.filter((s) => s.id !== cur.id);
-        reg.aktiv = null; save(reg);
+        const frisch = load();
+        frisch.sessions = frisch.sessions.filter((s) => s.id !== cur.id);
+        frisch.aktiv = null; save(frisch);
         await send(`Abgelegt: ${cur.titel}. Das Transkript bleibt auf dem Server erhalten.`);
         continue;
       }
-      if (text === "/fortsetzen") {
+      if (befehl(text, "fortsetzen") !== null) {
         if (!wartend.length) { await send("Keine wartenden Auftraege."); continue; }
         queue.push(...wartend); wartend = []; saveQueue();
         await send(`${queue.length} Auftrag/Auftraege wieder eingereiht. ${DAUER}`); pump();
         continue;
       }
-      if (text === "/verwerfen") {
+      if (befehl(text, "verwerfen") !== null) {
         if (!wartend.length) { await send("Keine wartenden Auftraege."); continue; }
         const n = wartend.length; wartend = []; saveQueue();
         await send(`${n} wartende(r) Auftrag/Auftraege verworfen.`);
         continue;
       }
-      if (text === "/remote-control" || text.startsWith("/remote-control ") || text === "/rc" || text.startsWith("/rc ")) {
-        const arg = (text.startsWith("/remote-control") ? text.slice(15) : text.slice(3)).trim().toLowerCase();
+      if (befehl(text, "remote-control") !== null) {
+        // v13: /rc kommt hier bereits als /remote-control an (ALIAS), Sonderzweig entfaellt.
+        const arg = befehl(text, "remote-control").toLowerCase();
         if (!cur) { await send("Keine aktive Session. Erst /neu oder /wechsel."); continue; }
         const tn = rcName(cur.id);
         if (arg === "aus" || arg === "stop") {
@@ -592,12 +789,12 @@ while (true) {
         }
         continue;
       }
-      if (text === "/neu" || text.startsWith("/neu ")) {
-        const rest = text.slice(4).trim();
+      if (befehl(text, "neu") !== null) {
+        const rest = befehl(text, "neu");
         const projekte = loadProj();
-        let cwd = null, auftrag = rest;
+        let cwd = null, auftrag = rest, neuerTitel = null; // v14: neuerTitel nur bei Projektanlage
         const erst = rest.split(/\s+/)[0] || "";
-        if (projekte[erst.toLowerCase()]) { cwd = projekte[erst.toLowerCase()]; auftrag = rest.slice(erst.length).trim(); }
+        if (ausTabelle(projekte, erst.toLowerCase())) { cwd = projekte[erst.toLowerCase()]; auftrag = rest.slice(erst.length).trim(); }
         else if (erst.startsWith("/") && existsSync(erst)) { cwd = erst; auftrag = rest.slice(erst.length).trim(); }
         // v9: genau ein unbekanntes, namensartiges Wort -> Projektordner anlegen und registrieren.
         // Bewusst nur bei einem einzelnen Wort: /neu <freier Auftrag> beginnt mit einem Verb und
@@ -608,20 +805,29 @@ while (true) {
           mkdirSync(pf, { recursive: true });
           projekte[nm] = pf;
           writeFileSync(PROJ, JSON.stringify(projekte, null, 2));
-          cwd = pf; auftrag = "";
+          cwd = pf;
+          neuerTitel = nm;
+          // v14: Session sofort eroeffnen statt auf die naechste Nachricht zu warten. Eine
+          // Claude-Session entsteht erst durch einen Lauf, also setzt der Bot selbst einen
+          // kurzen ab. "Lege nichts an" ist nicht schmueckend: im Modus acceptEdits wuerde
+          // Claude sonst ungefragt Dateien im frischen Verzeichnis erzeugen.
+          auftrag = `Neues, noch leeres Projektverzeichnis "${nm}". Antworte mit genau einem kurzen Satz, dass du bereit bist. Lege jetzt nichts an und aendere nichts.`;
           await send(`Neues Projekt angelegt und registriert: ${nm} -> ${pf}`);
         }
         if (cwd && !existsSync(cwd)) { await send(`Verzeichnis ${cwd} existiert nicht mehr. /projekte zeigt die Liste.`); continue; }
-        reg.aktiv = null; reg.naechstesCwd = cwd; save(reg);
-        if (auftrag) { queue.push({ text: auftrag, cwd }); saveQueue(); await send(`Neue Session in ${kurz(cwd)} wird eroeffnet, Auftrag laeuft. ${DAUER}`); pump(); }
+        const frisch = load();
+        frisch.aktiv = null; frisch.naechstesCwd = cwd; save(frisch);
+        if (auftrag) { queue.push({ text: auftrag, cwd, titel: neuerTitel }); saveQueue(); await send(`Neue Session in ${kurz(cwd)} wird eroeffnet, Auftrag laeuft. ${DAUER}`); pump(); }
         else await send(`Alles klar, deine naechste Nachricht eroeffnet eine neue Session in ${kurz(cwd)} (Modus ${modusName(reg.naechsterModus)}).`);
         continue;
       }
       // v12: Unbekannte Slash-Befehle abfangen statt an die CLI durchzureichen - die fuehrt sie
       // sonst als eigene Kommandos aus (Fund 07.09.: "/model haiku" lief als CLI-Befehl). Pfade wie
       // /etc/fstab haben einen zweiten Schraegstrich im ersten Wort und laufen weiter als Auftrag.
-      if (/^\/[a-zA-Z][a-zA-Z0-9_-]*(\s|$)/.test(text)) {
-        await send(`Unbekannter Befehl: ${text.split(/\s+/)[0]}` + "\n/start zeigt alle Befehle. Nichts wurde an Claude weitergereicht.");
+      // v15: Auch "/ status" mit Leerzeichen nach dem Schraegstrich abfangen. Genau dieser
+      // Vertipper hat die Session "/ wechseln 2" erzeugt - er rutschte als Auftrag durch.
+      if (/^\/\s?[a-zA-Z][a-zA-Z0-9_-]*(\s|$)/.test(text)) {
+        await send(`Unbekannter Befehl: ${text.slice(0, 40)}` + "\n/start zeigt alle Befehle. Nichts wurde an Claude weitergereicht.");
         continue;
       }
       queue.push({ text, cwd: null });
